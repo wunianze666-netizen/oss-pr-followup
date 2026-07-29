@@ -8,7 +8,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 from urllib.error import HTTPError, URLError
@@ -20,6 +20,7 @@ PR_FIELDS = "repository,number,title,updatedAt,url,commentsCount,labels,isDraft"
 API_ROOT = "https://api.github.com"
 USER_AGENT = "oss-pr-followup/0.2.0"
 AUTHOR_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
+UTC = timezone.utc
 
 
 class CLIError(RuntimeError):

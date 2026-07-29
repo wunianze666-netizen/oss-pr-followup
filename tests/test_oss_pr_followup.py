@@ -4,7 +4,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlparse
@@ -24,7 +24,7 @@ from oss_pr_followup import (
 )
 
 
-NOW = datetime(2026, 7, 30, tzinfo=UTC)
+NOW = datetime(2026, 7, 30, tzinfo=timezone.utc)
 
 
 def pr(number: int, updated_at: str, *, draft: bool = False) -> dict:
