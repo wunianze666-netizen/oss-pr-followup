@@ -1,11 +1,15 @@
+import io
+import json
 import sys
+import tempfile
 import unittest
+from contextlib import redirect_stdout
 from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from oss_pr_followup import age_in_days, render_report
+from oss_pr_followup import age_in_days, main, render_report
 
 
 NOW = datetime(2026, 7, 30, tzinfo=UTC)
@@ -40,6 +44,16 @@ class ReportTests(unittest.TestCase):
         self.assertIn("## No activity for 14+ days", report)
         self.assertIn("example/project#20", report)
         self.assertIn("(draft)", report)
+
+    def test_main_reads_offline_json_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            payload = Path(directory) / "prs.json"
+            payload.write_bytes(b"\xef\xbb\xbf" + json.dumps([pr(10, "2026-07-29T12:00:00Z")]).encode())
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(main(["--author", "octocat", "--json-file", str(payload)]), 0)
+
+        self.assertIn("example/project#10", stdout.getvalue())
 
 
 if __name__ == "__main__":

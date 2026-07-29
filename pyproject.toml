@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oss-pr-followup"
+version = "0.1.0"
+description = "Generate Markdown follow-up reports for open GitHub pull requests."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Nianze Wu" }]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+]
+
+[project.scripts]
+oss-pr-followup = "oss_pr_followup:main"
+
+[tool.setuptools]
+py-modules = ["oss_pr_followup"]
+package-dir = { "" = "src" }

@@ -102,7 +102,9 @@ def render_report(
 
 
 def load_prs(path: Path) -> list[dict[str, Any]]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    # PowerShell commonly writes UTF-8 JSON with a BOM; accepting it keeps
+    # offline reports portable across Windows and Unix shells.
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(payload, list):
         raise ValueError("The JSON input must be an array from `gh search prs`.")
     return payload

@@ -13,24 +13,32 @@ writes to GitHub and does not inspect repository contents.
 - Python 3.10+
 - [GitHub CLI](https://cli.github.com/) authenticated with `gh auth login`
 
+## Install
+
+Install directly from a checkout:
+
+```bash
+python -m pip install .
+```
+
 ## Usage
 
 Generate a report for the authenticated GitHub account:
 
 ```bash
-python src/oss_pr_followup.py
+oss-pr-followup
 ```
 
 Choose an account and mark PRs inactive for at least 21 days:
 
 ```bash
-python src/oss_pr_followup.py --author octocat --stale-after-days 21
+oss-pr-followup --author octocat --stale-after-days 21
 ```
 
 Write the report to a local file:
 
 ```bash
-python src/oss_pr_followup.py --output report.md
+oss-pr-followup --output report.md
 ```
 
 For an offline or reproducible report, save GitHub CLI output first and pass it
@@ -39,8 +47,11 @@ back with `--json-file`:
 ```bash
 gh search prs --author octocat --state open --limit 100 \
   --json repository,number,title,updatedAt,url,commentsCount,labels,isDraft > prs.json
-python src/oss_pr_followup.py --json-file prs.json
+oss-pr-followup --json-file prs.json
 ```
+
+The offline input also accepts UTF-8 files with a byte-order mark, which is
+useful when the JSON was saved from PowerShell on Windows.
 
 ## Checks
 
@@ -53,3 +64,7 @@ python -m unittest discover -s tests -v
 The repository contains no token handling, telemetry, or persistent account
 data. Generated reports are ignored by default because PR titles and links may
 be private to the report owner even when the source PRs are public.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
