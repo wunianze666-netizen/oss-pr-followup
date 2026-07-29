@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "oss-pr-followup"
-version = "0.1.0"
-description = "Generate Markdown follow-up reports for open GitHub pull requests."
+version = "0.2.0"
+description = "Generate follow-up reports for open GitHub pull requests."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -15,6 +15,11 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
 ]
+keywords = ["github", "pull-request", "open-source", "cli"]
+
+[project.urls]
+Homepage = "https://github.com/wunianze666-netizen/oss-pr-followup"
+Issues = "https://github.com/wunianze666-netizen/oss-pr-followup/issues"
 
 [project.scripts]
 oss-pr-followup = "oss_pr_followup:main"
