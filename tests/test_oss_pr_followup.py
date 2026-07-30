@@ -1,11 +1,13 @@
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlparse
 
@@ -17,8 +19,12 @@ from oss_pr_followup import (
     api_request_json,
     build_report_data,
     fetch_open_prs_api,
+    fetch_open_prs_graphql,
+    graphql_request_json,
     main,
     normalize_api_pr,
+    normalize_graphql_pr,
+    render_markdown,
     render_report,
     validate_author,
 )
@@ -38,6 +44,28 @@ def pr(number: int, updated_at: str, *, draft: bool = False) -> dict:
         "labels": [{"name": "documentation"}],
         "isDraft": draft,
     }
+
+
+def rich_pr(
+    number: int,
+    *,
+    review: str | None = None,
+    ci: str | None = None,
+    merge: str = "CLEAN",
+    review_requests: int = 0,
+    draft: bool = False,
+) -> dict:
+    item = pr(number, "2026-07-29T12:00:00Z", draft=draft)
+    item.update(
+        {
+            "reviewDecision": review,
+            "reviewRequestCount": review_requests,
+            "mergeStateStatus": merge,
+            "ciStatus": ci,
+            "triageAvailable": True,
+        }
+    )
+    return item
 
 
 class ReportTests(unittest.TestCase):
@@ -107,6 +135,38 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(normalized["labels"], ["enhancement"])
         self.assertTrue(normalized["isDraft"])
 
+    def test_normalize_graphql_pr_maps_triage_signals(self) -> None:
+        normalized = normalize_graphql_pr(
+            {
+                "repository": {"nameWithOwner": "example/project"},
+                "number": 42,
+                "title": "Improve API support",
+                "updatedAt": "2026-07-29T12:00:00Z",
+                "url": "https://github.com/example/project/pull/42",
+                "isDraft": False,
+                "comments": {"totalCount": 3},
+                "labels": {"nodes": [{"name": "enhancement"}]},
+                "reviewDecision": "CHANGES_REQUESTED",
+                "reviewRequests": {"totalCount": 1},
+                "mergeStateStatus": "BLOCKED",
+                "commits": {
+                    "nodes": [
+                        {
+                            "commit": {
+                                "statusCheckRollup": {"state": "FAILURE"},
+                            }
+                        }
+                    ]
+                },
+            }
+        )
+
+        self.assertEqual(normalized["repository"]["nameWithOwner"], "example/project")
+        self.assertEqual(normalized["reviewDecision"], "CHANGES_REQUESTED")
+        self.assertEqual(normalized["reviewRequestCount"], 1)
+        self.assertEqual(normalized["ciStatus"], "FAILURE")
+        self.assertTrue(normalized["triageAvailable"])
+
     def test_api_fetch_paginates_until_limit(self) -> None:
         requested_pages: list[int] = []
         requested_page_sizes: list[int] = []
@@ -146,6 +206,118 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(requested_page_sizes, [100, 100])
         self.assertEqual(len(prs), 150)
         self.assertEqual(prs[-1]["number"], 150)
+
+    def test_graphql_fetch_uses_cursor_pagination(self) -> None:
+        cursors: list[str | None] = []
+
+        def request_graphql(_query: str, variables: dict, *, token: str) -> dict:
+            self.assertEqual(token, "secret")
+            cursors.append(variables["after"])
+            number = len(cursors)
+            return {
+                "search": {
+                    "nodes": [
+                        {
+                            "repository": {"nameWithOwner": "example/project"},
+                            "number": number,
+                            "title": f"PR {number}",
+                            "updatedAt": "2026-07-29T12:00:00Z",
+                            "url": f"https://github.com/example/project/pull/{number}",
+                            "comments": {"totalCount": 0},
+                            "labels": {"nodes": []},
+                            "reviewRequests": {"totalCount": 0},
+                            "commits": {"nodes": []},
+                        }
+                    ],
+                    "pageInfo": {
+                        "hasNextPage": number == 1,
+                        "endCursor": "next-page" if number == 1 else None,
+                    },
+                }
+            }
+
+        prs = fetch_open_prs_graphql(
+            "octocat",
+            limit=2,
+            token="secret",
+            request_graphql=request_graphql,
+        )
+
+        self.assertEqual(cursors, [None, "next-page"])
+        self.assertEqual([item["number"] for item in prs], [1, 2])
+
+    def test_graphql_request_posts_token_and_variables(self) -> None:
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return b'{"data":{"viewer":{"login":"octocat"}}}'
+
+        def opener(request, *, timeout: int):
+            self.assertEqual(timeout, 20)
+            self.assertEqual(request.method, "POST")
+            self.assertEqual(request.get_header("Authorization"), "Bearer secret")
+            body = json.loads(request.data.decode("utf-8"))
+            self.assertEqual(body["variables"], {"expected": True})
+            return Response()
+
+        data = graphql_request_json(
+            "query Example { viewer { login } }",
+            {"expected": True},
+            token="secret",
+            opener=opener,
+        )
+
+        self.assertEqual(data["viewer"]["login"], "octocat")
+
+    def test_triage_classification_prioritizes_actionable_signals(self) -> None:
+        cases = (
+            (rich_pr(1, draft=True), "draft"),
+            (rich_pr(2, review="CHANGES_REQUESTED"), "author-action"),
+            (rich_pr(3, ci="FAILURE"), "author-action"),
+            (rich_pr(4, merge="DIRTY"), "author-action"),
+            (rich_pr(5, ci="PENDING"), "waiting-ci"),
+            (
+                rich_pr(6, review="APPROVED", ci="SUCCESS", merge="CLEAN"),
+                "ready-for-maintainer",
+            ),
+            (rich_pr(7, review="REVIEW_REQUIRED"), "waiting-review"),
+        )
+
+        for item, expected in cases:
+            normalized = build_report_data(
+                [item],
+                author="octocat",
+                stale_after_days=14,
+                now=NOW,
+                triage=True,
+            )
+            with self.subTest(expected=expected):
+                self.assertEqual(
+                    normalized["pullRequests"][0]["attentionCategory"],
+                    expected,
+                )
+
+    def test_triage_markdown_explains_attention_reason(self) -> None:
+        data = build_report_data(
+            [rich_pr(10, review="CHANGES_REQUESTED")],
+            author="octocat",
+            stale_after_days=14,
+            now=NOW,
+            triage=True,
+        )
+
+        report = render_markdown(data)
+        self.assertIn("# Open Pull Request Triage", report)
+        self.assertIn("## Author action needed (1)", report)
+        self.assertIn("A reviewer requested changes.", report)
+        self.assertIn("review: changes requested", report)
+        self.assertEqual(data["triageCounts"]["author-action"], 1)
+        self.assertNotIn("recent", data)
 
     def test_api_rate_limit_error_does_not_expose_token(self) -> None:
         def rate_limited(*_args, **_kwargs):
@@ -208,6 +380,17 @@ class ReportTests(unittest.TestCase):
 
         self.assertEqual(status, 2)
         self.assertEqual(stderr.getvalue(), "error: --author is required with --json-file.\n")
+
+    def test_main_requires_token_for_triage(self) -> None:
+        stderr = io.StringIO()
+        with patch.dict(os.environ, {}, clear=True), redirect_stderr(stderr):
+            status = main(["--author", "octocat", "--triage"])
+
+        self.assertEqual(status, 2)
+        self.assertEqual(
+            stderr.getvalue(),
+            "error: --triage requires GH_TOKEN or GITHUB_TOKEN.\n",
+        )
 
 
 if __name__ == "__main__":

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "oss-pr-followup"
-version = "0.2.0"
-description = "Generate follow-up reports for open GitHub pull requests."
+dynamic = ["version"]
+description = "Triage and report open GitHub pull requests across repositories."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -15,7 +15,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
 ]
-keywords = ["github", "pull-request", "open-source", "cli"]
+keywords = ["github", "pull-request", "open-source", "triage", "cli"]
 
 [project.urls]
 Homepage = "https://github.com/wunianze666-netizen/oss-pr-followup"
@@ -27,3 +27,6 @@ oss-pr-followup = "oss_pr_followup:main"
 [tool.setuptools]
 py-modules = ["oss_pr_followup"]
 package-dir = { "" = "src" }
+
+[tool.setuptools.dynamic]
+version = { attr = "oss_pr_followup.VERSION" }

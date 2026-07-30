@@ -18,9 +18,93 @@ from urllib.request import Request, urlopen
 
 PR_FIELDS = "repository,number,title,updatedAt,url,commentsCount,labels,isDraft"
 API_ROOT = "https://api.github.com"
-USER_AGENT = "oss-pr-followup/0.2.0"
+GRAPHQL_URL = f"{API_ROOT}/graphql"
+VERSION = "0.3.0"
+USER_AGENT = f"oss-pr-followup/{VERSION}"
 AUTHOR_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 UTC = timezone.utc
+TRIAGE_QUERY = """
+query OpenPullRequestTriage($query: String!, $first: Int!, $after: String) {
+  search(query: $query, type: ISSUE, first: $first, after: $after) {
+    issueCount
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    nodes {
+      ... on PullRequest {
+        repository {
+          nameWithOwner
+        }
+        number
+        title
+        updatedAt
+        url
+        isDraft
+        comments {
+          totalCount
+        }
+        labels(first: 20) {
+          nodes {
+            name
+          }
+        }
+        reviewDecision
+        reviewRequests(first: 1) {
+          totalCount
+        }
+        mergeStateStatus
+        commits(last: 1) {
+          nodes {
+            commit {
+              statusCheckRollup {
+                state
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+TRIAGE_SECTIONS = (
+    (
+        "author-action",
+        "Author action needed",
+        "Address these before waiting for another maintainer response.",
+    ),
+    (
+        "ready-for-maintainer",
+        "Ready for maintainer",
+        "Approval and checks look ready; repository policy still determines whether the PR can merge.",
+    ),
+    (
+        "waiting-ci",
+        "Waiting for CI",
+        "Checks are still running; no follow-up is implied.",
+    ),
+    (
+        "waiting-review",
+        "Waiting for review",
+        "A review is required or has been requested.",
+    ),
+    (
+        "follow-up-candidate",
+        "Follow-up candidates",
+        "Read the discussion and contribution policy before sending a reminder.",
+    ),
+    (
+        "draft",
+        "Drafts",
+        "Draft pull requests are normally waiting for author work.",
+    ),
+    (
+        "monitoring",
+        "Monitoring",
+        "No immediate action signal was detected.",
+    ),
+)
 
 
 class CLIError(RuntimeError):
@@ -63,22 +147,8 @@ def authenticated_login_gh() -> str:
     return login
 
 
-def api_request_json(
-    url: str,
-    *,
-    token: str | None = None,
-    opener: Any = urlopen,
-) -> dict[str, Any]:
-    """Read one GitHub API response without exposing credentials in errors."""
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "User-Agent": USER_AGENT,
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    request = Request(url, headers=headers)
+def read_json_request(request: Request, *, opener: Any = urlopen) -> dict[str, Any]:
+    """Execute a GitHub request without exposing credentials in errors."""
     try:
         with opener(request, timeout=20) as response:
             payload = json.loads(response.read().decode("utf-8"))
@@ -90,7 +160,7 @@ def api_request_json(
         remaining = error.headers.get("X-RateLimit-Remaining") if error.headers else None
         if error.code in (403, 429) and remaining == "0":
             raise CLIError(
-                "GitHub API rate limit reached. Set GITHUB_TOKEN for a higher limit and try again."
+                "GitHub API rate limit reached. Set GH_TOKEN or GITHUB_TOKEN and try again."
             ) from None
         raise CLIError(f"GitHub API request failed ({error.code}): {detail}") from None
     except URLError as error:
@@ -103,9 +173,67 @@ def api_request_json(
     return payload
 
 
+def github_headers(token: str | None = None) -> dict[str, str]:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": USER_AGENT,
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def api_request_json(
+    url: str,
+    *,
+    token: str | None = None,
+    opener: Any = urlopen,
+) -> dict[str, Any]:
+    """Read one GitHub REST API response."""
+    request = Request(url, headers=github_headers(token))
+    return read_json_request(request, opener=opener)
+
+
+def graphql_request_json(
+    query: str,
+    variables: dict[str, Any],
+    *,
+    token: str,
+    opener: Any = urlopen,
+) -> dict[str, Any]:
+    """Run an authenticated GitHub GraphQL query."""
+    body = json.dumps({"query": query, "variables": variables}).encode("utf-8")
+    request = Request(
+        GRAPHQL_URL,
+        data=body,
+        headers=github_headers(token),
+        method="POST",
+    )
+    payload = read_json_request(request, opener=opener)
+    errors = payload.get("errors")
+    if isinstance(errors, list) and errors:
+        messages = [
+            error.get("message")
+            for error in errors
+            if isinstance(error, dict) and isinstance(error.get("message"), str)
+        ]
+        detail = "; ".join(messages) if messages else "query failed"
+        raise CLIError(f"GitHub GraphQL query failed: {detail}")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise CLIError("GitHub GraphQL response did not contain data.")
+    return data
+
+
+def environment_token() -> str | None:
+    """Use the same token environment variables recognized by GitHub tooling."""
+    return os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+
+
 def authenticated_login_api(token: str | None) -> str:
     if not token:
-        raise CLIError("Pass --author, or set GITHUB_TOKEN so the account can be detected.")
+        raise CLIError("Pass --author, or set GH_TOKEN/GITHUB_TOKEN so the account can be detected.")
     login = api_request_json(f"{API_ROOT}/user", token=token).get("login")
     if not isinstance(login, str) or not login:
         raise CLIError("GitHub API did not return an authenticated account.")
@@ -173,6 +301,93 @@ def fetch_open_prs_api(
     return results[:limit]
 
 
+def normalize_graphql_pr(item: dict[str, Any]) -> dict[str, Any]:
+    """Convert a GraphQL PullRequest node to the report's stable PR shape."""
+    repository = item.get("repository")
+    if not isinstance(repository, dict):
+        raise CLIError("GitHub GraphQL returned a pull request without a repository.")
+
+    label_connection = item.get("labels")
+    label_nodes = label_connection.get("nodes", []) if isinstance(label_connection, dict) else []
+    labels = [
+        label.get("name")
+        for label in label_nodes
+        if isinstance(label, dict) and isinstance(label.get("name"), str)
+    ]
+
+    comments = item.get("comments")
+    comments_count = comments.get("totalCount", 0) if isinstance(comments, dict) else 0
+    review_requests = item.get("reviewRequests")
+    review_request_count = (
+        review_requests.get("totalCount", 0) if isinstance(review_requests, dict) else 0
+    )
+
+    ci_status = None
+    commits = item.get("commits")
+    commit_nodes = commits.get("nodes", []) if isinstance(commits, dict) else []
+    if commit_nodes and isinstance(commit_nodes[0], dict):
+        commit = commit_nodes[0].get("commit")
+        rollup = commit.get("statusCheckRollup") if isinstance(commit, dict) else None
+        if isinstance(rollup, dict) and isinstance(rollup.get("state"), str):
+            ci_status = rollup["state"]
+
+    return {
+        "repository": {"nameWithOwner": repository.get("nameWithOwner")},
+        "number": item.get("number"),
+        "title": item.get("title"),
+        "updatedAt": item.get("updatedAt"),
+        "url": item.get("url"),
+        "commentsCount": comments_count,
+        "labels": labels,
+        "isDraft": bool(item.get("isDraft", False)),
+        "reviewDecision": item.get("reviewDecision"),
+        "reviewRequestCount": review_request_count,
+        "mergeStateStatus": item.get("mergeStateStatus"),
+        "ciStatus": ci_status,
+        "triageAvailable": True,
+    }
+
+
+def fetch_open_prs_graphql(
+    author: str,
+    *,
+    limit: int,
+    token: str,
+    request_graphql: Any = graphql_request_json,
+) -> list[dict[str, Any]]:
+    """Fetch rich PR review and CI signals in batches through GraphQL."""
+    results: list[dict[str, Any]] = []
+    cursor: str | None = None
+    while len(results) < limit:
+        variables = {
+            "query": f"is:pr is:open author:{author} sort:updated-desc",
+            "first": min(100, limit - len(results)),
+            "after": cursor,
+        }
+        data = request_graphql(TRIAGE_QUERY, variables, token=token)
+        search = data.get("search")
+        if not isinstance(search, dict):
+            raise CLIError("GitHub GraphQL response did not contain search results.")
+        nodes = search.get("nodes")
+        if not isinstance(nodes, list):
+            raise CLIError("GitHub GraphQL search did not contain a pull request list.")
+        results.extend(
+            normalize_graphql_pr(node)
+            for node in nodes
+            if isinstance(node, dict) and isinstance(node.get("repository"), dict)
+        )
+
+        page_info = search.get("pageInfo")
+        if not isinstance(page_info, dict):
+            raise CLIError("GitHub GraphQL search did not contain pagination data.")
+        if not page_info.get("hasNextPage") or not nodes:
+            break
+        cursor = page_info.get("endCursor")
+        if not isinstance(cursor, str) or not cursor:
+            raise CLIError("GitHub GraphQL search returned an invalid pagination cursor.")
+    return results[:limit]
+
+
 def fetch_open_prs_gh(author: str, *, limit: int) -> list[dict[str, Any]]:
     output = run_gh(
         [
@@ -228,7 +443,7 @@ def report_pr(pr: dict[str, Any], now: datetime) -> dict[str, Any]:
         for label in pr.get("labels", [])
         if isinstance(label, str) or isinstance(label, dict)
     ]
-    return {
+    normalized = {
         "repository": pr["repository"]["nameWithOwner"],
         "number": pr["number"],
         "title": pr["title"],
@@ -239,6 +454,59 @@ def report_pr(pr: dict[str, Any], now: datetime) -> dict[str, Any]:
         "isDraft": bool(pr.get("isDraft", False)),
         "labels": [label for label in labels if isinstance(label, str)],
     }
+    if pr.get("triageAvailable"):
+        normalized.update(
+            {
+                "reviewDecision": pr.get("reviewDecision"),
+                "reviewRequestCount": pr.get("reviewRequestCount", 0),
+                "mergeStateStatus": pr.get("mergeStateStatus"),
+                "ciStatus": pr.get("ciStatus"),
+            }
+        )
+    return normalized
+
+
+def classify_attention(
+    pr: dict[str, Any],
+    *,
+    stale_after_days: int,
+) -> tuple[str, str]:
+    """Classify a rich PR record by the next observable workflow step."""
+    if pr["isDraft"]:
+        return "draft", "Draft PR; continue author work before requesting review."
+
+    review = pr.get("reviewDecision")
+    ci_status = pr.get("ciStatus")
+    merge_status = pr.get("mergeStateStatus")
+    review_requests = pr.get("reviewRequestCount", 0)
+
+    if review == "CHANGES_REQUESTED":
+        return "author-action", "A reviewer requested changes."
+    if ci_status in {"ERROR", "FAILURE"}:
+        return "author-action", f"CI status is {signal_text(ci_status)}."
+    if merge_status == "DIRTY":
+        return "author-action", "The PR has merge conflicts."
+    if merge_status == "BEHIND":
+        return "author-action", "The branch is behind its base branch."
+    if ci_status in {"EXPECTED", "PENDING"}:
+        return "waiting-ci", f"CI status is {signal_text(ci_status)}."
+    if (
+        review == "APPROVED"
+        and ci_status in {None, "SUCCESS"}
+        and merge_status in {"CLEAN", "HAS_HOOKS"}
+    ):
+        return "ready-for-maintainer", "Reviews are approved and no failing check is visible."
+    if review == "REVIEW_REQUIRED" or (
+        isinstance(review_requests, int) and review_requests > 0
+    ):
+        return "waiting-review", "A review is required or currently requested."
+    if pr["ageDays"] >= stale_after_days:
+        return "follow-up-candidate", f"No GitHub activity for {pr['ageDays']} days."
+    return "monitoring", "No immediate action signal was detected."
+
+
+def signal_text(value: str) -> str:
+    return value.lower().replace("_", " ")
 
 
 def build_report_data(
@@ -247,21 +515,37 @@ def build_report_data(
     author: str,
     stale_after_days: int,
     now: datetime,
+    triage: bool = False,
 ) -> dict[str, Any]:
     """Build a stable report model shared by Markdown and JSON output."""
     normalized = [report_pr(pr, now) for pr in prs]
     ordered_prs = sorted(normalized, key=lambda pr: pr["updatedAt"], reverse=True)
-    recent, stale = [], []
-    for pr in ordered_prs:
-        (stale if pr["ageDays"] >= stale_after_days else recent).append(pr)
-    return {
+    data = {
         "author": author,
         "generatedAt": now.isoformat().replace("+00:00", "Z"),
         "staleAfterDays": stale_after_days,
         "pullRequestsInReport": len(ordered_prs),
-        "recent": recent,
-        "stale": stale,
+        "mode": "triage" if triage else "activity",
     }
+    if triage:
+        triage_counts = {key: 0 for key, _heading, _guidance in TRIAGE_SECTIONS}
+        for pr in ordered_prs:
+            category, reason = classify_attention(
+                pr,
+                stale_after_days=stale_after_days,
+            )
+            pr["attentionCategory"] = category
+            pr["attentionReason"] = reason
+            triage_counts[category] += 1
+        data["pullRequests"] = ordered_prs
+        data["triageCounts"] = triage_counts
+    else:
+        recent, stale = [], []
+        for pr in ordered_prs:
+            (stale if pr["ageDays"] >= stale_after_days else recent).append(pr)
+        data["recent"] = recent
+        data["stale"] = stale
+    return data
 
 
 def render_markdown(data: dict[str, Any]) -> str:
@@ -270,14 +554,32 @@ def render_markdown(data: dict[str, Any]) -> str:
     stale_after_days = data["staleAfterDays"]
     generated = parse_timestamp(data["generatedAt"])
 
+    triage_mode = data.get("mode") == "triage"
     lines = [
-        "# Open Pull Request Follow-up",
+        "# Open Pull Request Triage" if triage_mode else "# Open Pull Request Follow-up",
         "",
         f"Account: [`{author}`](https://github.com/{author})",
         f"Generated: {generated.date().isoformat()} UTC",
         f"PRs in report: {data['pullRequestsInReport']}",
         "",
     ]
+    if triage_mode:
+        for key, heading, guidance in TRIAGE_SECTIONS:
+            items = [
+                pr
+                for pr in data["pullRequests"]
+                if pr["attentionCategory"] == key
+            ]
+            if not items:
+                continue
+            lines.extend([f"## {heading} ({len(items)})", "", guidance, ""])
+            for pr in items:
+                lines.append(render_pr_line(pr, include_triage=True))
+            lines.append("")
+        if not data["pullRequestsInReport"]:
+            lines.extend(["_No open pull requests found._", ""])
+        return "\n".join(lines)
+
     for heading, items, guidance in (
         ("Recent activity", data["recent"], "No follow-up is implied by this section."),
         (
@@ -291,17 +593,38 @@ def render_markdown(data: dict[str, Any]) -> str:
             lines.extend(["_None._", ""])
             continue
         for pr in items:
-            draft = " (draft)" if pr.get("isDraft") else ""
-            comments = pr.get("commentsCount", 0)
-            link_text = markdown_link_text(
-                f"{pr['repository']}#{pr['number']}: {pr['title']}"
-            )
-            lines.append(
-                f"- [{link_text}]({pr['url']}){draft} - "
-                f"last activity {pr['ageDays']}d ago; {comments} comment(s)"
-            )
+            lines.append(render_pr_line(pr))
         lines.append("")
     return "\n".join(lines)
+
+
+def render_pr_line(pr: dict[str, Any], *, include_triage: bool = False) -> str:
+    draft = " (draft)" if pr.get("isDraft") else ""
+    comments = pr.get("commentsCount", 0)
+    link_text = markdown_link_text(
+        f"{pr['repository']}#{pr['number']}: {pr['title']}"
+    )
+    line = (
+        f"- [{link_text}]({pr['url']}){draft} - "
+        f"last activity {pr['ageDays']}d ago; {comments} comment(s)"
+    )
+    if include_triage:
+        signals = [
+            f"review: {signal_text(pr['reviewDecision'])}"
+            if isinstance(pr.get("reviewDecision"), str)
+            else None,
+            f"CI: {signal_text(pr['ciStatus'])}"
+            if isinstance(pr.get("ciStatus"), str)
+            else None,
+            f"merge: {signal_text(pr['mergeStateStatus'])}"
+            if isinstance(pr.get("mergeStateStatus"), str)
+            else None,
+        ]
+        signal_summary = "; ".join(signal for signal in signals if signal)
+        line += f". {pr['attentionReason']}"
+        if signal_summary:
+            line += f" Signals: {signal_summary}."
+    return line
 
 
 def markdown_link_text(value: str) -> str:
@@ -337,10 +660,12 @@ def load_prs(path: Path) -> list[dict[str, Any]]:
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     parser.add_argument("--author", help="GitHub login to report on.")
     parser.add_argument("--stale-after-days", type=int, default=14, help="Days without activity before a PR is grouped as stale (default: 14).")
     parser.add_argument("--json-file", type=Path, help="Read previously saved `gh search prs` JSON instead of calling GitHub.")
     parser.add_argument("--source", choices=("api", "gh"), default="api", help="GitHub data source (default: api).")
+    parser.add_argument("--triage", action="store_true", help="Include review, CI, and next-action signals (requires a token).")
     parser.add_argument("--limit", type=int, default=100, help="Maximum open PRs to fetch, from 1 to 1000 (default: 100).")
     parser.add_argument("--format", choices=("markdown", "json"), default="markdown", help="Report format (default: markdown).")
     parser.add_argument("--output", type=Path, help="Write the report to this path instead of stdout.")
@@ -355,8 +680,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not 1 <= args.limit <= 1000:
             raise CLIError("--limit must be between 1 and 1000.")
 
-        token = os.environ.get("GITHUB_TOKEN")
-        if args.json_file:
+        token = environment_token()
+        if args.triage:
+            if args.json_file:
+                raise CLIError("--triage cannot be combined with --json-file.")
+            if args.source != "api":
+                raise CLIError("--triage cannot be combined with --source gh.")
+            if not token:
+                raise CLIError("--triage requires GH_TOKEN or GITHUB_TOKEN.")
+            author = validate_author(args.author or authenticated_login_api(token))
+            prs = fetch_open_prs_graphql(author, limit=args.limit, token=token)
+        elif args.json_file:
             if not args.author:
                 raise CLIError("--author is required with --json-file.")
             author = validate_author(args.author)
@@ -373,6 +707,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             author=author,
             stale_after_days=args.stale_after_days,
             now=datetime.now(UTC),
+            triage=args.triage,
         )
         report = (
             json.dumps(data, indent=2, ensure_ascii=False)

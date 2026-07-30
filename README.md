@@ -1,37 +1,40 @@
 # OSS PR Follow-up
 
-A dependency-free command-line helper for turning a GitHub user's open pull
-requests into a short Markdown or JSON follow-up report. It is intended for
-people who contribute to multiple projects and want to see which PRs have gone
-quiet without maintaining a spreadsheet or remote database.
+[![Tests](https://github.com/wunianze666-netizen/oss-pr-followup/actions/workflows/tests.yml/badge.svg)](https://github.com/wunianze666-netizen/oss-pr-followup/actions/workflows/tests.yml)
+[![Release](https://img.shields.io/github/v/release/wunianze666-netizen/oss-pr-followup)](https://github.com/wunianze666-netizen/oss-pr-followup/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-The default data source is GitHub's public REST API, so public accounts work
-with Python alone. The tool is read-only: it never writes to GitHub and does not
-inspect repository contents.
+A dependency-free CLI that turns one contributor's open pull requests into an
+actionable Markdown or JSON report. It helps people contributing across many
+repositories answer two questions:
 
-## Requirements
+1. Which pull requests need my attention?
+2. Which pull requests are waiting on CI, review, or a maintainer?
 
-- Python 3.10+
-- Internet access when reading live GitHub data
+The tool is read-only. It never comments, closes, labels, or modifies a pull
+request.
 
-[GitHub CLI](https://cli.github.com/) is optional and only needed for the
-`--source gh` mode.
+## Why use it?
+
+GitHub already provides excellent per-PR pages and a global pull request list.
+OSS PR Follow-up adds a portable report that can be saved, reviewed offline, or
+fed into another script.
+
+The default activity report works for public accounts without authentication.
+Optional triage mode uses one batched GraphQL query per page to add review, CI,
+merge, and next-action signals.
 
 ## Install
 
-Install directly from GitHub:
+Install the current release directly from GitHub:
 
 ```bash
-python -m pip install "git+https://github.com/wunianze666-netizen/oss-pr-followup.git"
+python -m pip install "git+https://github.com/wunianze666-netizen/oss-pr-followup.git@v0.3.0"
 ```
 
-For local development, install from a checkout:
+Python 3.10 or later is required. GitHub CLI is optional.
 
-```bash
-python -m pip install .
-```
-
-## Usage
+## Activity report
 
 Generate a report for any public GitHub account:
 
@@ -39,47 +42,62 @@ Generate a report for any public GitHub account:
 oss-pr-followup --author octocat
 ```
 
-Choose an account and mark PRs inactive for at least 21 days:
+Change the inactivity threshold or write a JSON artifact:
 
 ```bash
 oss-pr-followup --author octocat --stale-after-days 21
-```
-
-Write the report to a local file:
-
-```bash
-oss-pr-followup --author octocat --output report.md
-```
-
-Produce structured output for another tool or dashboard:
-
-```bash
 oss-pr-followup --author octocat --format json --output report.json
 ```
 
-Use `--limit` to control the maximum number included. Counts in the output are
-explicitly labeled as the number of PRs in the report, not the account's total,
-because a limit may truncate the search.
+This mode uses GitHub's public REST API. Set `GH_TOKEN` or `GITHUB_TOKEN` for a
+higher rate limit or access to pull requests visible to that token.
 
-Unauthenticated API requests are suitable for occasional public reports. Set a
-standard `GITHUB_TOKEN` environment variable for a higher rate limit and access
-to PRs visible to that token:
+## Actionable triage
+
+Triage mode groups pull requests into:
+
+- **Author action needed**: requested changes, failed CI, merge conflicts, or a
+  branch behind its base
+- **Ready for maintainer**: approved, clean, and without a failing check
+- **Waiting for CI**
+- **Waiting for review**
+- **Follow-up candidates**: inactive without a more specific workflow signal
+- **Drafts**
+- **Monitoring**
+
+It requires a token because GitHub GraphQL does not support anonymous queries.
+If GitHub CLI is already authenticated, inject its token only for the current
+shell:
 
 ```bash
-GITHUB_TOKEN=... oss-pr-followup --author octocat
+# bash/zsh
+export GH_TOKEN="$(gh auth token)"
+oss-pr-followup --author octocat --triage
 ```
 
-If `GITHUB_TOKEN` is set, `--author` may be omitted and the authenticated
-account is detected automatically.
+```powershell
+# PowerShell
+$env:GH_TOKEN = gh auth token
+oss-pr-followup --author octocat --triage
+```
 
-To use an existing GitHub CLI login instead:
+Use a least-privilege token. Public-only triage does not require write access.
+Private pull requests appear only when the token can read their repositories.
+
+Triage categories are evidence-based hints, not instructions to contact a
+maintainer. Always read the pull request discussion and contribution policy
+before following up.
+
+## Other inputs
+
+Use an existing GitHub CLI login instead of the default REST source:
 
 ```bash
 oss-pr-followup --source gh
 ```
 
-For an offline or reproducible report, save GitHub CLI output and pass it back
-with the account name:
+For an offline or reproducible activity report, save GitHub CLI output and pass
+it back with the account name:
 
 ```bash
 gh search prs --author octocat --state open --limit 100 \
@@ -87,30 +105,36 @@ gh search prs --author octocat --state open --limit 100 \
 oss-pr-followup --author octocat --json-file prs.json
 ```
 
-The offline input also accepts UTF-8 files with a byte-order mark, which is
-useful when the JSON was saved from PowerShell on Windows.
+The offline input accepts UTF-8 files with or without a byte-order mark.
 
-## Report semantics
+## Project direction
 
-The report groups PRs by their most recent GitHub activity. "No activity" is
-not the same as "maintainer action required"; users should read the discussion
-and contribution guidelines before sending a follow-up. Draft PRs are marked
-but remain in the report.
+This project is not a fork and does not copy another dashboard's source. See
+[the product research](docs/product-research.md) for comparable tools,
+licenses, ideas considered, and the deliberate differences in scope.
 
-## Checks
+## Development
 
 ```bash
+python -m pip install .
+python -m compileall -q src tests
 python -m unittest discover -s tests -v
 oss-pr-followup --help
 ```
 
+CI runs the package and test suite on Linux and Windows with Python 3.10 and
+3.13.
+
 ## Privacy
 
-The tool reads `GITHUB_TOKEN` only from the process environment and sends it
-only to `api.github.com`; it does not print, store, or transmit the token
-elsewhere. There is no telemetry or persistent account data. Generated reports
-are ignored by default because PR titles and links may be private to the report
-owner.
+The tool reads `GH_TOKEN` or `GITHUB_TOKEN` only from the process environment
+and sends it only to `api.github.com`. It does not print, persist, or transmit
+the token elsewhere. There is no telemetry, remote database, or stored account
+data. Generated `report.md` files are ignored by default because private PR
+titles and links may appear in authenticated reports.
+
+See [SECURITY.md](SECURITY.md) for private vulnerability reporting and token
+handling guidance.
 
 ## License
 
