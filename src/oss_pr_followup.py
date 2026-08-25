@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 PR_FIELDS = "repository,number,title,updatedAt,url,commentsCount,labels,isDraft"
 API_ROOT = "https://api.github.com"
 GRAPHQL_URL = f"{API_ROOT}/graphql"
+GRAPHQL_PAGE_SIZE = 10
 VERSION = "0.3.0"
 USER_AGENT = f"oss-pr-followup/{VERSION}"
 AUTHOR_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
@@ -41,6 +42,9 @@ query OpenPullRequestTriage($query: String!, $first: Int!, $after: String) {
         updatedAt
         url
         isDraft
+        author {
+          login
+        }
         comments {
           totalCount
         }
@@ -54,6 +58,21 @@ query OpenPullRequestTriage($query: String!, $first: Int!, $after: String) {
           totalCount
         }
         mergeStateStatus
+        reviewThreads(last: 10) {
+          totalCount
+          nodes {
+            isResolved
+            isOutdated
+            comments(last: 1) {
+              nodes {
+                author {
+                  login
+                  __typename
+                }
+              }
+            }
+          }
+        }
         commits(last: 1) {
           nodes {
             commit {
@@ -322,6 +341,44 @@ def normalize_graphql_pr(item: dict[str, Any]) -> dict[str, Any]:
         review_requests.get("totalCount", 0) if isinstance(review_requests, dict) else 0
     )
 
+    author = item.get("author")
+    author_login = author.get("login") if isinstance(author, dict) else None
+    review_threads = item.get("reviewThreads")
+    thread_nodes = review_threads.get("nodes", []) if isinstance(review_threads, dict) else []
+    thread_total = (
+        review_threads.get("totalCount", len(thread_nodes))
+        if isinstance(review_threads, dict)
+        else 0
+    )
+    active_thread_count = 0
+    author_action_thread_count = 0
+    reviewer_action_thread_count = 0
+    for thread in thread_nodes:
+        if (
+            not isinstance(thread, dict)
+            or thread.get("isResolved")
+            or thread.get("isOutdated")
+        ):
+            continue
+        active_thread_count += 1
+        thread_comments = thread.get("comments")
+        comment_nodes = (
+            thread_comments.get("nodes", []) if isinstance(thread_comments, dict) else []
+        )
+        latest_comment = comment_nodes[-1] if comment_nodes else None
+        latest_author = (
+            latest_comment.get("author") if isinstance(latest_comment, dict) else None
+        )
+        if not isinstance(latest_author, dict) or latest_author.get("__typename") == "Bot":
+            continue
+        latest_login = latest_author.get("login")
+        if not isinstance(latest_login, str) or not latest_login:
+            continue
+        if isinstance(author_login, str) and latest_login.casefold() == author_login.casefold():
+            reviewer_action_thread_count += 1
+        else:
+            author_action_thread_count += 1
+
     ci_status = None
     commits = item.get("commits")
     commit_nodes = commits.get("nodes", []) if isinstance(commits, dict) else []
@@ -342,6 +399,12 @@ def normalize_graphql_pr(item: dict[str, Any]) -> dict[str, Any]:
         "isDraft": bool(item.get("isDraft", False)),
         "reviewDecision": item.get("reviewDecision"),
         "reviewRequestCount": review_request_count,
+        "unresolvedReviewThreadCount": active_thread_count,
+        "reviewThreadAuthorActionCount": author_action_thread_count,
+        "reviewThreadReviewerActionCount": reviewer_action_thread_count,
+        "reviewThreadsTruncated": (
+            isinstance(thread_total, int) and thread_total > len(thread_nodes)
+        ),
         "mergeStateStatus": item.get("mergeStateStatus"),
         "ciStatus": ci_status,
         "triageAvailable": True,
@@ -361,7 +424,7 @@ def fetch_open_prs_graphql(
     while len(results) < limit:
         variables = {
             "query": f"is:pr is:open author:{author} sort:updated-desc",
-            "first": min(100, limit - len(results)),
+            "first": min(GRAPHQL_PAGE_SIZE, limit - len(results)),
             "after": cursor,
         }
         data = request_graphql(TRIAGE_QUERY, variables, token=token)
@@ -459,6 +522,14 @@ def report_pr(pr: dict[str, Any], now: datetime) -> dict[str, Any]:
             {
                 "reviewDecision": pr.get("reviewDecision"),
                 "reviewRequestCount": pr.get("reviewRequestCount", 0),
+                "unresolvedReviewThreadCount": pr.get("unresolvedReviewThreadCount", 0),
+                "reviewThreadAuthorActionCount": pr.get(
+                    "reviewThreadAuthorActionCount", 0
+                ),
+                "reviewThreadReviewerActionCount": pr.get(
+                    "reviewThreadReviewerActionCount", 0
+                ),
+                "reviewThreadsTruncated": bool(pr.get("reviewThreadsTruncated", False)),
                 "mergeStateStatus": pr.get("mergeStateStatus"),
                 "ciStatus": pr.get("ciStatus"),
             }
@@ -479,9 +550,29 @@ def classify_attention(
     ci_status = pr.get("ciStatus")
     merge_status = pr.get("mergeStateStatus")
     review_requests = pr.get("reviewRequestCount", 0)
+    unresolved_threads = pr.get("unresolvedReviewThreadCount", 0)
+    author_action_threads = pr.get("reviewThreadAuthorActionCount", 0)
+    reviewer_action_threads = pr.get("reviewThreadReviewerActionCount", 0)
 
     if review == "CHANGES_REQUESTED":
         return "author-action", "A reviewer requested changes."
+    if pr.get("reviewThreadsTruncated"):
+        return "author-action", "Review thread data exceeds the query window; inspect the PR."
+    if isinstance(author_action_threads, int) and author_action_threads > 0:
+        return (
+            "author-action",
+            f"{author_action_threads} unresolved review thread(s) await an author reply.",
+        )
+    classified_threads = (
+        author_action_threads + reviewer_action_threads
+        if isinstance(author_action_threads, int) and isinstance(reviewer_action_threads, int)
+        else 0
+    )
+    if (
+        isinstance(unresolved_threads, int)
+        and unresolved_threads > classified_threads
+    ):
+        return "author-action", "An unresolved review thread needs inspection."
     if ci_status in {"ERROR", "FAILURE"}:
         return "author-action", f"CI status is {signal_text(ci_status)}."
     if merge_status == "DIRTY":
@@ -490,10 +581,16 @@ def classify_attention(
         return "author-action", "The branch is behind its base branch."
     if ci_status in {"EXPECTED", "PENDING"}:
         return "waiting-ci", f"CI status is {signal_text(ci_status)}."
+    if isinstance(reviewer_action_threads, int) and reviewer_action_threads > 0:
+        return (
+            "waiting-review",
+            f"The author replied in {reviewer_action_threads} unresolved review thread(s).",
+        )
     if (
         review == "APPROVED"
         and ci_status in {None, "SUCCESS"}
         and merge_status in {"CLEAN", "HAS_HOOKS"}
+        and unresolved_threads == 0
     ):
         return "ready-for-maintainer", "Reviews are approved and no failing check is visible."
     if review == "REVIEW_REQUIRED" or (
@@ -618,6 +715,10 @@ def render_pr_line(pr: dict[str, Any], *, include_triage: bool = False) -> str:
             else None,
             f"merge: {signal_text(pr['mergeStateStatus'])}"
             if isinstance(pr.get("mergeStateStatus"), str)
+            else None,
+            f"review threads: {pr['unresolvedReviewThreadCount']} unresolved"
+            if isinstance(pr.get("unresolvedReviewThreadCount"), int)
+            and pr["unresolvedReviewThreadCount"] > 0
             else None,
         ]
         signal_summary = "; ".join(signal for signal in signals if signal)

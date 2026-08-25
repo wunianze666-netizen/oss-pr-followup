@@ -22,7 +22,7 @@ fed into another script.
 
 The default activity report works for public accounts without authentication.
 Optional triage mode uses one batched GraphQL query per page to add review, CI,
-merge, and next-action signals.
+merge, unresolved review-thread, and next-action signals.
 
 ## Install
 
@@ -57,7 +57,8 @@ higher rate limit or access to pull requests visible to that token.
 Triage mode groups pull requests into:
 
 - **Author action needed**: requested changes, failed CI, merge conflicts, or a
-  branch behind its base
+  branch behind its base; unresolved inline feedback is also surfaced even
+  when a reviewer used a non-blocking `COMMENT` review
 - **Ready for maintainer**: approved, clean, and without a failing check
 - **Waiting for CI**
 - **Waiting for review**
@@ -86,7 +87,12 @@ Private pull requests appear only when the token can read their repositories.
 
 Triage categories are evidence-based hints, not instructions to contact a
 maintainer. Always read the pull request discussion and contribution policy
-before following up.
+before following up. For active inline feedback, the report distinguishes a
+thread awaiting the author's reply from one where the author has replied and
+is waiting on a reviewer. Bot-only threads are conservatively flagged for
+inspection instead of being silently ignored. To stay within GitHub's GraphQL
+resource limits, triage batches 10 PRs per query, inspects up to 10 review
+threads per PR, and flags larger histories for direct inspection.
 
 ## Other inputs
 

@@ -53,6 +53,10 @@ def rich_pr(
     ci: str | None = None,
     merge: str = "CLEAN",
     review_requests: int = 0,
+    unresolved_threads: int = 0,
+    author_action_threads: int = 0,
+    reviewer_action_threads: int = 0,
+    review_threads_truncated: bool = False,
     draft: bool = False,
 ) -> dict:
     item = pr(number, "2026-07-29T12:00:00Z", draft=draft)
@@ -60,6 +64,10 @@ def rich_pr(
         {
             "reviewDecision": review,
             "reviewRequestCount": review_requests,
+            "unresolvedReviewThreadCount": unresolved_threads,
+            "reviewThreadAuthorActionCount": author_action_threads,
+            "reviewThreadReviewerActionCount": reviewer_action_threads,
+            "reviewThreadsTruncated": review_threads_truncated,
             "mergeStateStatus": merge,
             "ciStatus": ci,
             "triageAvailable": True,
@@ -144,11 +152,60 @@ class ReportTests(unittest.TestCase):
                 "updatedAt": "2026-07-29T12:00:00Z",
                 "url": "https://github.com/example/project/pull/42",
                 "isDraft": False,
+                "author": {"login": "octocat"},
                 "comments": {"totalCount": 3},
                 "labels": {"nodes": [{"name": "enhancement"}]},
                 "reviewDecision": "CHANGES_REQUESTED",
                 "reviewRequests": {"totalCount": 1},
                 "mergeStateStatus": "BLOCKED",
+                "reviewThreads": {
+                    "totalCount": 5,
+                    "nodes": [
+                        {
+                            "isResolved": False,
+                            "isOutdated": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "author": {
+                                            "login": "maintainer",
+                                            "__typename": "User",
+                                        }
+                                    }
+                                ]
+                            },
+                        },
+                        {
+                            "isResolved": False,
+                            "isOutdated": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "author": {
+                                            "login": "OctoCat",
+                                            "__typename": "User",
+                                        }
+                                    }
+                                ]
+                            },
+                        },
+                        {
+                            "isResolved": False,
+                            "isOutdated": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "author": {
+                                            "login": "review-bot",
+                                            "__typename": "Bot",
+                                        }
+                                    }
+                                ]
+                            },
+                        },
+                        {"isResolved": True, "isOutdated": False, "comments": {"nodes": []}},
+                    ],
+                },
                 "commits": {
                     "nodes": [
                         {
@@ -165,6 +222,10 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(normalized["reviewDecision"], "CHANGES_REQUESTED")
         self.assertEqual(normalized["reviewRequestCount"], 1)
         self.assertEqual(normalized["ciStatus"], "FAILURE")
+        self.assertEqual(normalized["unresolvedReviewThreadCount"], 3)
+        self.assertEqual(normalized["reviewThreadAuthorActionCount"], 1)
+        self.assertEqual(normalized["reviewThreadReviewerActionCount"], 1)
+        self.assertTrue(normalized["reviewThreadsTruncated"])
         self.assertTrue(normalized["triageAvailable"])
 
     def test_api_fetch_paginates_until_limit(self) -> None:
@@ -209,42 +270,47 @@ class ReportTests(unittest.TestCase):
 
     def test_graphql_fetch_uses_cursor_pagination(self) -> None:
         cursors: list[str | None] = []
+        page_sizes: list[int] = []
 
         def request_graphql(_query: str, variables: dict, *, token: str) -> dict:
             self.assertEqual(token, "secret")
             cursors.append(variables["after"])
-            number = len(cursors)
+            page_sizes.append(variables["first"])
+            start = sum(page_sizes[:-1])
+            nodes = [
+                {
+                    "repository": {"nameWithOwner": "example/project"},
+                    "number": number,
+                    "title": f"PR {number}",
+                    "updatedAt": "2026-07-29T12:00:00Z",
+                    "url": f"https://github.com/example/project/pull/{number}",
+                    "comments": {"totalCount": 0},
+                    "labels": {"nodes": []},
+                    "reviewRequests": {"totalCount": 0},
+                    "commits": {"nodes": []},
+                }
+                for number in range(start + 1, start + variables["first"] + 1)
+            ]
             return {
                 "search": {
-                    "nodes": [
-                        {
-                            "repository": {"nameWithOwner": "example/project"},
-                            "number": number,
-                            "title": f"PR {number}",
-                            "updatedAt": "2026-07-29T12:00:00Z",
-                            "url": f"https://github.com/example/project/pull/{number}",
-                            "comments": {"totalCount": 0},
-                            "labels": {"nodes": []},
-                            "reviewRequests": {"totalCount": 0},
-                            "commits": {"nodes": []},
-                        }
-                    ],
+                    "nodes": nodes,
                     "pageInfo": {
-                        "hasNextPage": number == 1,
-                        "endCursor": "next-page" if number == 1 else None,
+                        "hasNextPage": len(cursors) == 1,
+                        "endCursor": "next-page" if len(cursors) == 1 else None,
                     },
                 }
             }
 
         prs = fetch_open_prs_graphql(
             "octocat",
-            limit=2,
+            limit=11,
             token="secret",
             request_graphql=request_graphql,
         )
 
         self.assertEqual(cursors, [None, "next-page"])
-        self.assertEqual([item["number"] for item in prs], [1, 2])
+        self.assertEqual(page_sizes, [10, 1])
+        self.assertEqual([item["number"] for item in prs], list(range(1, 12)))
 
     def test_graphql_request_posts_token_and_variables(self) -> None:
         class Response:
@@ -280,6 +346,16 @@ class ReportTests(unittest.TestCase):
             (rich_pr(2, review="CHANGES_REQUESTED"), "author-action"),
             (rich_pr(3, ci="FAILURE"), "author-action"),
             (rich_pr(4, merge="DIRTY"), "author-action"),
+            (
+                rich_pr(8, unresolved_threads=1, author_action_threads=1),
+                "author-action",
+            ),
+            (
+                rich_pr(9, unresolved_threads=1, reviewer_action_threads=1),
+                "waiting-review",
+            ),
+            (rich_pr(10, unresolved_threads=1), "author-action"),
+            (rich_pr(11, review_threads_truncated=True), "author-action"),
             (rich_pr(5, ci="PENDING"), "waiting-ci"),
             (
                 rich_pr(6, review="APPROVED", ci="SUCCESS", merge="CLEAN"),
@@ -318,6 +394,20 @@ class ReportTests(unittest.TestCase):
         self.assertIn("review: changes requested", report)
         self.assertEqual(data["triageCounts"]["author-action"], 1)
         self.assertNotIn("recent", data)
+
+    def test_triage_markdown_surfaces_unresolved_review_threads(self) -> None:
+        data = build_report_data(
+            [rich_pr(10, unresolved_threads=2, author_action_threads=2)],
+            author="octocat",
+            stale_after_days=14,
+            now=NOW,
+            triage=True,
+        )
+
+        report = render_markdown(data)
+
+        self.assertIn("2 unresolved review thread(s) await an author reply.", report)
+        self.assertIn("review threads: 2 unresolved", report)
 
     def test_api_rate_limit_error_does_not_expose_token(self) -> None:
         def rate_limited(*_args, **_kwargs):
