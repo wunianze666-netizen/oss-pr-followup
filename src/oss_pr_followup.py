@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
@@ -20,6 +21,9 @@ PR_FIELDS = "repository,number,title,updatedAt,url,commentsCount,labels,isDraft"
 API_ROOT = "https://api.github.com"
 GRAPHQL_URL = f"{API_ROOT}/graphql"
 GRAPHQL_PAGE_SIZE = 10
+HTTP_MAX_ATTEMPTS = 3
+HTTP_RETRY_DELAY_CAP = 10.0
+HTTP_TRANSIENT_STATUSES = frozenset({502, 503, 504})
 VERSION = "0.3.0"
 USER_AGENT = f"oss-pr-followup/{VERSION}"
 AUTHOR_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
@@ -166,26 +170,60 @@ def authenticated_login_gh() -> str:
     return login
 
 
-def read_json_request(request: Request, *, opener: Any = urlopen) -> dict[str, Any]:
-    """Execute a GitHub request without exposing credentials in errors."""
+def retry_after_seconds(error: HTTPError) -> float | None:
+    """Return a bounded numeric Retry-After delay when the server supplied one."""
+    value = error.headers.get("Retry-After") if error.headers else None
+    if value is None:
+        return None
     try:
-        with opener(request, timeout=20) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except HTTPError as error:
+        delay = float(value)
+    except (TypeError, ValueError):
+        return None
+    if delay < 0 or delay > HTTP_RETRY_DELAY_CAP:
+        return None
+    return delay
+
+
+def read_json_request(
+    request: Request,
+    *,
+    opener: Any = urlopen,
+    sleeper: Any = time.sleep,
+) -> dict[str, Any]:
+    """Execute a GitHub request without exposing credentials in errors."""
+    for attempt in range(HTTP_MAX_ATTEMPTS):
         try:
-            detail = json.loads(error.read().decode("utf-8")).get("message", "request failed")
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            detail = "request failed"
-        remaining = error.headers.get("X-RateLimit-Remaining") if error.headers else None
-        if error.code in (403, 429) and remaining == "0":
-            raise CLIError(
-                "GitHub API rate limit reached. Set GH_TOKEN or GITHUB_TOKEN and try again."
-            ) from None
-        raise CLIError(f"GitHub API request failed ({error.code}): {detail}") from None
-    except URLError as error:
-        raise CLIError(f"Could not reach GitHub API: {error.reason}") from None
-    except TimeoutError:
-        raise CLIError("GitHub API request timed out.") from None
+            with opener(request, timeout=20) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            break
+        except HTTPError as error:
+            try:
+                detail = json.loads(error.read().decode("utf-8")).get(
+                    "message", "request failed"
+                )
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                detail = "request failed"
+            remaining = (
+                error.headers.get("X-RateLimit-Remaining") if error.headers else None
+            )
+            if error.code in (403, 429) and remaining == "0":
+                raise CLIError(
+                    "GitHub API rate limit reached. Set GH_TOKEN or GITHUB_TOKEN and try again."
+                ) from None
+            retry_after_header = error.headers.get("Retry-After") if error.headers else None
+            retry_after = retry_after_seconds(error)
+            retryable = error.code in HTTP_TRANSIENT_STATUSES or (
+                error.code in (403, 429) and retry_after is not None
+            )
+            bounded_delay = retry_after_header is None or retry_after is not None
+            if retryable and bounded_delay and attempt + 1 < HTTP_MAX_ATTEMPTS:
+                sleeper(retry_after if retry_after is not None else 2.0**attempt)
+                continue
+            raise CLIError(f"GitHub API request failed ({error.code}): {detail}") from None
+        except URLError as error:
+            raise CLIError(f"Could not reach GitHub API: {error.reason}") from None
+        except TimeoutError:
+            raise CLIError("GitHub API request timed out.") from None
 
     if not isinstance(payload, dict):
         raise CLIError("GitHub API returned an unexpected response.")

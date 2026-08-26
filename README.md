@@ -14,6 +14,10 @@ repositories answer two questions:
 The tool is read-only. It never comments, closes, labels, or modifies a pull
 request.
 
+Read-only API calls retry short GitHub `502`, `503`, and `504` outages up to
+two times with bounded backoff. Primary rate-limit exhaustion still fails
+immediately so the CLI does not hide a token or quota problem behind a long wait.
+
 ## Why use it?
 
 GitHub already provides excellent per-PR pages and a global pull request list.

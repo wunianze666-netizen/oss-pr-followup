@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
@@ -24,6 +25,7 @@ from oss_pr_followup import (
     main,
     normalize_api_pr,
     normalize_graphql_pr,
+    read_json_request,
     render_markdown,
     render_report,
     validate_author,
@@ -339,6 +341,122 @@ class ReportTests(unittest.TestCase):
         )
 
         self.assertEqual(data["viewer"]["login"], "octocat")
+
+    def test_json_request_retries_transient_server_error(self) -> None:
+        attempts = 0
+        delays: list[float] = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return b'{"ok":true}'
+
+        def opener(_request, *, timeout: int):
+            nonlocal attempts
+            self.assertEqual(timeout, 20)
+            attempts += 1
+            if attempts == 1:
+                raise HTTPError(
+                    "https://api.github.com/graphql",
+                    503,
+                    "Service Unavailable",
+                    {"Retry-After": "0"},
+                    io.BytesIO(b'{"message":"temporarily unavailable"}'),
+                )
+            return Response()
+
+        payload = read_json_request(
+            Request("https://api.github.com/graphql"),
+            opener=opener,
+            sleeper=delays.append,
+        )
+
+        self.assertEqual(payload, {"ok": True})
+        self.assertEqual(attempts, 2)
+        self.assertEqual(delays, [0.0])
+
+    def test_json_request_stops_after_retry_budget(self) -> None:
+        attempts = 0
+        delays: list[float] = []
+
+        def opener(_request, *, timeout: int):
+            nonlocal attempts
+            self.assertEqual(timeout, 20)
+            attempts += 1
+            raise HTTPError(
+                "https://api.github.com/graphql",
+                502,
+                "Bad Gateway",
+                {"Retry-After": "0"},
+                io.BytesIO(b'{"message":"upstream unavailable"}'),
+            )
+
+        with self.assertRaisesRegex(CLIError, r"\(502\): upstream unavailable"):
+            read_json_request(
+                Request("https://api.github.com/graphql"),
+                opener=opener,
+                sleeper=delays.append,
+            )
+
+        self.assertEqual(attempts, 3)
+        self.assertEqual(delays, [0.0, 0.0])
+
+    def test_json_request_does_not_retry_primary_rate_limit(self) -> None:
+        attempts = 0
+        delays: list[float] = []
+
+        def opener(_request, *, timeout: int):
+            nonlocal attempts
+            self.assertEqual(timeout, 20)
+            attempts += 1
+            raise HTTPError(
+                "https://api.github.com/graphql",
+                403,
+                "Forbidden",
+                {"Retry-After": "0", "X-RateLimit-Remaining": "0"},
+                io.BytesIO(b'{"message":"API rate limit exceeded"}'),
+            )
+
+        with self.assertRaisesRegex(CLIError, "rate limit reached"):
+            read_json_request(
+                Request("https://api.github.com/graphql"),
+                opener=opener,
+                sleeper=delays.append,
+            )
+
+        self.assertEqual(attempts, 1)
+        self.assertEqual(delays, [])
+
+    def test_json_request_does_not_wait_past_delay_cap(self) -> None:
+        attempts = 0
+        delays: list[float] = []
+
+        def opener(_request, *, timeout: int):
+            nonlocal attempts
+            self.assertEqual(timeout, 20)
+            attempts += 1
+            raise HTTPError(
+                "https://api.github.com/graphql",
+                503,
+                "Service Unavailable",
+                {"Retry-After": "60"},
+                io.BytesIO(b'{"message":"maintenance window"}'),
+            )
+
+        with self.assertRaisesRegex(CLIError, r"\(503\): maintenance window"):
+            read_json_request(
+                Request("https://api.github.com/graphql"),
+                opener=opener,
+                sleeper=delays.append,
+            )
+
+        self.assertEqual(attempts, 1)
+        self.assertEqual(delays, [])
 
     def test_triage_classification_prioritizes_actionable_signals(self) -> None:
         cases = (
