@@ -61,15 +61,16 @@ higher rate limit or access to pull requests visible to that token.
 
 Triage mode groups pull requests into:
 
-- **Author action needed**: requested changes, failed CI, merge conflicts, or a
-  branch behind its base; unresolved inline feedback is also surfaced even
-  when a reviewer used a non-blocking `COMMENT` review
+- **Author action needed**: requested changes, failed CI, or merge conflicts;
+  unresolved inline feedback is also surfaced even when a reviewer used a
+  non-blocking `COMMENT` review
 - **Ready for maintainer**: approved, clean, and without a failing check
 - **Waiting for CI**
 - **Waiting for review**
 - **Follow-up candidates**: inactive without a more specific workflow signal
 - **Drafts**
-- **Monitoring**
+- **Monitoring**: including branches that are behind their base when no stronger
+  signal shows that repository policy requires an update
 
 It requires a token because GitHub GraphQL does not support anonymous queries.
 If GitHub CLI is already authenticated, inject its token only for the current

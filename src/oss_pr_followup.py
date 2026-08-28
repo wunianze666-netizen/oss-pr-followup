@@ -621,8 +621,6 @@ def classify_attention(
         return "author-action", f"CI status is {signal_text(ci_status)}."
     if merge_status == "DIRTY":
         return "author-action", "The PR has merge conflicts."
-    if merge_status == "BEHIND":
-        return "author-action", "The branch is behind its base branch."
     if ci_status in {"EXPECTED", "PENDING"}:
         return "waiting-ci", f"CI status is {signal_text(ci_status)}."
     if isinstance(reviewer_action_threads, int) and reviewer_action_threads > 0:
@@ -641,6 +639,12 @@ def classify_attention(
         isinstance(review_requests, int) and review_requests > 0
     ):
         return "waiting-review", "A review is required or currently requested."
+    if merge_status == "BEHIND":
+        return (
+            "monitoring",
+            "The branch is behind its base branch; repository policy determines "
+            "whether an update is required.",
+        )
     if pr["ageDays"] >= stale_after_days:
         return "follow-up-candidate", f"No GitHub activity for {pr['ageDays']} days."
     return "monitoring", "No immediate action signal was detected."

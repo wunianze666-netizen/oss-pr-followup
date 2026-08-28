@@ -570,6 +570,33 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(data["triageCounts"]["author-action"], 1)
         self.assertNotIn("recent", data)
 
+    def test_behind_branch_does_not_invent_author_action(self) -> None:
+        data = build_report_data(
+            [
+                rich_pr(
+                    12,
+                    review="REVIEW_REQUIRED",
+                    ci="SUCCESS",
+                    merge="BEHIND",
+                ),
+                rich_pr(
+                    13,
+                    review="APPROVED",
+                    ci="SUCCESS",
+                    merge="BEHIND",
+                ),
+            ],
+            author="octocat",
+            stale_after_days=14,
+            now=NOW,
+            triage=True,
+        )
+
+        waiting_review, monitoring = data["pullRequests"]
+        self.assertEqual(waiting_review["attentionCategory"], "waiting-review")
+        self.assertEqual(monitoring["attentionCategory"], "monitoring")
+        self.assertIn("repository policy", monitoring["attentionReason"])
+
     def test_triage_markdown_surfaces_unresolved_review_threads(self) -> None:
         data = build_report_data(
             [rich_pr(10, unresolved_threads=2, author_action_threads=2)],
