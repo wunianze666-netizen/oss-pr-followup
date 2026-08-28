@@ -221,8 +221,14 @@ def read_json_request(
                 continue
             raise CLIError(f"GitHub API request failed ({error.code}): {detail}") from None
         except URLError as error:
+            if attempt + 1 < HTTP_MAX_ATTEMPTS:
+                sleeper(2.0**attempt)
+                continue
             raise CLIError(f"Could not reach GitHub API: {error.reason}") from None
         except TimeoutError:
+            if attempt + 1 < HTTP_MAX_ATTEMPTS:
+                sleeper(2.0**attempt)
+                continue
             raise CLIError("GitHub API request timed out.") from None
 
     if not isinstance(payload, dict):

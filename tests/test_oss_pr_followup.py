@@ -8,7 +8,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request
 
@@ -379,6 +379,63 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(payload, {"ok": True})
         self.assertEqual(attempts, 2)
         self.assertEqual(delays, [0.0])
+
+    def test_json_request_retries_transient_network_failures(self) -> None:
+        for transient_error in (
+            URLError("temporary name resolution failure"),
+            TimeoutError(),
+        ):
+            with self.subTest(error=type(transient_error).__name__):
+                attempts = 0
+                delays: list[float] = []
+
+                class Response:
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *_args):
+                        return False
+
+                    def read(self) -> bytes:
+                        return b'{"ok":true}'
+
+                def opener(_request, *, timeout: int):
+                    nonlocal attempts
+                    self.assertEqual(timeout, 20)
+                    attempts += 1
+                    if attempts == 1:
+                        raise transient_error
+                    return Response()
+
+                payload = read_json_request(
+                    Request("https://api.github.com/graphql"),
+                    opener=opener,
+                    sleeper=delays.append,
+                )
+
+                self.assertEqual(payload, {"ok": True})
+                self.assertEqual(attempts, 2)
+                self.assertEqual(delays, [1.0])
+
+    def test_json_request_stops_after_network_retry_budget(self) -> None:
+        attempts = 0
+        delays: list[float] = []
+
+        def opener(_request, *, timeout: int):
+            nonlocal attempts
+            self.assertEqual(timeout, 20)
+            attempts += 1
+            raise URLError("network unreachable")
+
+        with self.assertRaisesRegex(CLIError, "network unreachable"):
+            read_json_request(
+                Request("https://api.github.com/graphql"),
+                opener=opener,
+                sleeper=delays.append,
+            )
+
+        self.assertEqual(attempts, 3)
+        self.assertEqual(delays, [1.0, 2.0])
 
     def test_json_request_stops_after_retry_budget(self) -> None:
         attempts = 0
