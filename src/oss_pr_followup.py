@@ -815,6 +815,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--json-file", type=Path, help="Read previously saved `gh search prs` JSON instead of calling GitHub.")
     parser.add_argument("--source", choices=("api", "gh"), default="api", help="GitHub data source (default: api).")
     parser.add_argument("--triage", action="store_true", help="Include review, CI, and next-action signals (requires a token).")
+    parser.add_argument(
+        "--fail-on-author-action",
+        action="store_true",
+        help="Return exit status 1 after rendering when triage finds author action.",
+    )
     parser.add_argument("--limit", type=int, default=100, help="Maximum open PRs to fetch, from 1 to 1000 (default: 100).")
     parser.add_argument("--format", choices=("markdown", "json"), default="markdown", help="Report format (default: markdown).")
     parser.add_argument("--output", type=Path, help="Write the report to this path instead of stdout.")
@@ -828,6 +833,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise CLIError("--stale-after-days must be at least 1.")
         if not 1 <= args.limit <= 1000:
             raise CLIError("--limit must be between 1 and 1000.")
+        if args.fail_on_author_action and not args.triage:
+            raise CLIError("--fail-on-author-action requires --triage.")
 
         token = environment_token()
         if args.triage:
@@ -867,6 +874,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.output.write_text(report + "\n", encoding="utf-8")
         else:
             print(report)
+        if (
+            args.fail_on_author_action
+            and data["triageCounts"]["author-action"] > 0
+        ):
+            return 1
         return 0
     except (CLIError, OSError, json.JSONDecodeError) as error:
         print(f"error: {error}", file=sys.stderr)

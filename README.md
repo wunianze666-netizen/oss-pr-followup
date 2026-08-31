@@ -100,6 +100,19 @@ inspection instead of being silently ignored. To stay within GitHub's GraphQL
 resource limits, triage batches 10 PRs per query, inspects up to 10 review
 threads per PR, and flags larger histories for direct inspection.
 
+Scheduled jobs can turn the **Author action needed** category into a reliable
+process signal without losing the report:
+
+```bash
+oss-pr-followup --author octocat --triage --fail-on-author-action --output report.md
+```
+
+The command writes the complete report first, then exits with status `1` when
+author action is present. Status `0` means no author action was detected, while
+status `2` remains reserved for configuration, input, and API errors. This
+option requires `--triage` because the activity-only data source has no review,
+CI, or merge signals.
+
 ## Other inputs
 
 Use an existing GitHub CLI login instead of the default REST source:

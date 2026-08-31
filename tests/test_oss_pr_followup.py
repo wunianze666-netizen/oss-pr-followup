@@ -684,6 +684,59 @@ class ReportTests(unittest.TestCase):
             "error: --triage requires GH_TOKEN or GITHUB_TOKEN.\n",
         )
 
+    def test_main_can_signal_author_action_after_rendering_report(self) -> None:
+        stdout = io.StringIO()
+        with (
+            patch.dict(os.environ, {"GH_TOKEN": "secret"}, clear=True),
+            patch(
+                "oss_pr_followup.fetch_open_prs_graphql",
+                return_value=[rich_pr(10, review="CHANGES_REQUESTED")],
+            ),
+            redirect_stdout(stdout),
+        ):
+            status = main(
+                [
+                    "--author",
+                    "octocat",
+                    "--triage",
+                    "--fail-on-author-action",
+                ]
+            )
+
+        self.assertEqual(status, 1)
+        self.assertIn("## Author action needed (1)", stdout.getvalue())
+
+    def test_main_does_not_fail_when_triage_has_no_author_action(self) -> None:
+        with (
+            patch.dict(os.environ, {"GH_TOKEN": "secret"}, clear=True),
+            patch(
+                "oss_pr_followup.fetch_open_prs_graphql",
+                return_value=[rich_pr(10, review="REVIEW_REQUIRED")],
+            ),
+            redirect_stdout(io.StringIO()),
+        ):
+            status = main(
+                [
+                    "--author",
+                    "octocat",
+                    "--triage",
+                    "--fail-on-author-action",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+
+    def test_fail_on_author_action_requires_triage_mode(self) -> None:
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = main(["--author", "octocat", "--fail-on-author-action"])
+
+        self.assertEqual(status, 2)
+        self.assertEqual(
+            stderr.getvalue(),
+            "error: --fail-on-author-action requires --triage.\n",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
