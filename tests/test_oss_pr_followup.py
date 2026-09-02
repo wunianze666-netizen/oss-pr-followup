@@ -29,6 +29,7 @@ from oss_pr_followup import (
     render_markdown,
     render_report,
     validate_author,
+    write_report_file,
 )
 
 
@@ -661,6 +662,58 @@ class ReportTests(unittest.TestCase):
         report = json.loads(stdout.getvalue())
         self.assertEqual(report["author"], "octocat")
         self.assertEqual(report["pullRequestsInReport"], 1)
+
+    def test_report_file_replace_failure_preserves_previous_report(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "report.json"
+            output.write_text("previous report\n", encoding="utf-8")
+
+            with (
+                patch("oss_pr_followup.os.replace", side_effect=OSError("replace failed")),
+                self.assertRaisesRegex(OSError, "replace failed"),
+            ):
+                write_report_file(output, "new report")
+
+            self.assertEqual(output.read_text(encoding="utf-8"), "previous report\n")
+            self.assertEqual(list(Path(directory).iterdir()), [output])
+
+    def test_report_file_atomically_replaces_previous_report(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "report.md"
+            output.write_text("previous report\n", encoding="utf-8")
+
+            write_report_file(output, "new report")
+
+            self.assertEqual(output.read_text(encoding="utf-8"), "new report\n")
+            self.assertEqual(list(Path(directory).iterdir()), [output])
+
+    def test_main_preserves_previous_report_when_replace_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            payload = Path(directory) / "prs.json"
+            payload.write_text("[]", encoding="utf-8")
+            output = Path(directory) / "report.md"
+            output.write_text("previous report\n", encoding="utf-8")
+            stderr = io.StringIO()
+
+            with (
+                patch("oss_pr_followup.os.replace", side_effect=OSError("replace failed")),
+                redirect_stderr(stderr),
+            ):
+                status = main(
+                    [
+                        "--author",
+                        "octocat",
+                        "--json-file",
+                        str(payload),
+                        "--output",
+                        str(output),
+                    ]
+                )
+
+            self.assertEqual(status, 2)
+            self.assertEqual(stderr.getvalue(), "error: replace failed\n")
+            self.assertEqual(output.read_text(encoding="utf-8"), "previous report\n")
+            self.assertEqual(set(Path(directory).iterdir()), {payload, output})
 
     def test_main_reports_missing_author_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

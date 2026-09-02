@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -807,6 +808,26 @@ def load_prs(path: Path) -> list[dict[str, Any]]:
     return payload
 
 
+def write_report_file(path: Path, report: str) -> None:
+    """Replace an output report only after its complete contents are durable."""
+    temporary_path = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        with temporary_path.open(
+            mode="x", encoding="utf-8", newline="\n"
+        ) as temporary_file:
+            temporary_file.write(report)
+            temporary_file.write("\n")
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, path)
+    except BaseException:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
@@ -871,7 +892,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             else render_markdown(data)
         )
         if args.output:
-            args.output.write_text(report + "\n", encoding="utf-8")
+            write_report_file(args.output, report)
         else:
             print(report)
         if (

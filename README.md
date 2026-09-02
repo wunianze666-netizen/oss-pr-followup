@@ -107,6 +107,12 @@ process signal without losing the report:
 oss-pr-followup --author octocat --triage --fail-on-author-action --output report.md
 ```
 
+File output is written to a temporary file in the destination directory and
+atomically replaced only after the complete UTF-8 report is flushed to disk.
+If writing or replacement fails, the previous report remains intact and the
+temporary file is removed. This keeps scheduled jobs from destroying their
+last valid report during an interrupted update.
+
 The command writes the complete report first, then exits with status `1` when
 author action is present. Status `0` means no author action was detected, while
 status `2` remains reserved for configuration, input, and API errors. This
