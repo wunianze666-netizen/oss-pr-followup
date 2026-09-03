@@ -111,7 +111,10 @@ File output is written to a temporary file in the destination directory and
 atomically replaced only after the complete UTF-8 report is flushed to disk.
 If writing or replacement fails, the previous report remains intact and the
 temporary file is removed. This keeps scheduled jobs from destroying their
-last valid report during an interrupted update.
+last valid report during an interrupted update. New report files are created
+with owner-only permissions on POSIX systems; replacing an existing report
+preserves its file mode so an atomic update does not silently broaden access
+to private pull request data.
 
 The command writes the complete report first, then exits with status `1` when
 author action is present. Status `0` means no author action was detected, while

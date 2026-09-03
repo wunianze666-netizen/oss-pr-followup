@@ -687,6 +687,26 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(output.read_text(encoding="utf-8"), "new report\n")
             self.assertEqual(list(Path(directory).iterdir()), [output])
 
+    def test_report_file_creates_temporary_file_with_private_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "report.md"
+
+            with patch("oss_pr_followup.os.open", wraps=os.open) as secure_open:
+                write_report_file(output, "private pull request titles")
+
+            self.assertEqual(secure_open.call_args.args[2], 0o600)
+
+    @unittest.skipIf(os.name == "nt", "Windows does not expose POSIX file modes")
+    def test_report_file_preserves_existing_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "report.md"
+            output.write_text("previous report\n", encoding="utf-8")
+            output.chmod(0o640)
+
+            write_report_file(output, "new report")
+
+            self.assertEqual(output.stat().st_mode & 0o777, 0o640)
+
     def test_main_preserves_previous_report_when_replace_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             payload = Path(directory) / "prs.json"

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import subprocess
 import sys
 import time
@@ -812,13 +813,32 @@ def write_report_file(path: Path, report: str) -> None:
     """Replace an output report only after its complete contents are durable."""
     temporary_path = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
     try:
-        with temporary_path.open(
-            mode="x", encoding="utf-8", newline="\n"
-        ) as temporary_file:
+        destination_mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        destination_mode = None
+    try:
+        descriptor = os.open(
+            temporary_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        try:
+            temporary_file = os.fdopen(
+                descriptor,
+                mode="w",
+                encoding="utf-8",
+                newline="\n",
+            )
+        except BaseException:
+            os.close(descriptor)
+            raise
+        with temporary_file:
             temporary_file.write(report)
             temporary_file.write("\n")
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
+        if destination_mode is not None:
+            os.chmod(temporary_path, destination_mode)
         os.replace(temporary_path, path)
     except BaseException:
         try:
