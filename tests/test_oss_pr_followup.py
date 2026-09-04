@@ -271,6 +271,70 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(len(prs), 150)
         self.assertEqual(prs[-1]["number"], 150)
 
+    def test_api_fetch_rejects_incomplete_search_pages(self) -> None:
+        for incomplete_page, empty in ((1, True), (1, False), (2, False)):
+            with self.subTest(incomplete_page=incomplete_page, empty=empty):
+                requested_pages = []
+
+                def request_json(url: str, *, token: str | None) -> dict:
+                    page = int(parse_qs(urlparse(url).query)["page"][0])
+                    requested_pages.append(page)
+                    return {
+                        "total_count": 0 if empty else 2,
+                        "incomplete_results": page == incomplete_page,
+                        "items": [] if empty else [
+                            {
+                                "repository_url": "https://api.github.com/repos/example/project",
+                                "number": page,
+                                "title": f"PR {page}",
+                                "updated_at": "2026-07-29T12:00:00Z",
+                                "html_url": f"https://github.com/example/project/pull/{page}",
+                            }
+                        ],
+                    }
+
+                with self.assertRaisesRegex(CLIError, "incomplete"):
+                    fetch_open_prs_api(
+                        "octocat", limit=incomplete_page, request_json=request_json
+                    )
+
+                self.assertEqual(requested_pages, list(range(1, incomplete_page + 1)))
+
+    def test_api_fetch_accepts_complete_empty_search(self) -> None:
+        def request_json(_url: str, *, token: str | None) -> dict:
+            return {"total_count": 0, "incomplete_results": False, "items": []}
+
+        self.assertEqual(
+            fetch_open_prs_api("octocat", limit=100, request_json=request_json), []
+        )
+
+    def test_main_preserves_report_when_search_is_incomplete(self) -> None:
+        def request_json(_url: str, *, token: str | None) -> dict:
+            return {"total_count": 0, "incomplete_results": True, "items": []}
+
+        def fetch(author: str, **kwargs) -> list[dict]:
+            return fetch_open_prs_api(author, request_json=request_json, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "report.json"
+            output.write_text("previous report\n", encoding="utf-8")
+            stdout, stderr = io.StringIO(), io.StringIO()
+
+            with (
+                patch("oss_pr_followup.fetch_open_prs_api", side_effect=fetch),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                status = main(
+                    ["--author", "octocat", "--format", "json", "--output", str(output)]
+                )
+
+            self.assertEqual(status, 2)
+            self.assertIn("incomplete", stderr.getvalue())
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertEqual(output.read_text(encoding="utf-8"), "previous report\n")
+            self.assertEqual(list(Path(directory).iterdir()), [output])
+
     def test_graphql_fetch_uses_cursor_pagination(self) -> None:
         cursors: list[str | None] = []
         page_sizes: list[int] = []

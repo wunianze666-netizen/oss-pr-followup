@@ -353,6 +353,11 @@ def fetch_open_prs_api(
             }
         )
         payload = request_json(f"{API_ROOT}/search/issues?{query}", token=token)
+        if payload.get("incomplete_results") is True:
+            raise CLIError(
+                "GitHub API search returned incomplete results; "
+                "no report was generated. Try again later."
+            )
         items = payload.get("items")
         if not isinstance(items, list):
             raise CLIError("GitHub API search response did not contain a pull request list.")

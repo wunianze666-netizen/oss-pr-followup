@@ -57,6 +57,13 @@ oss-pr-followup --author octocat --format json --output report.json
 This mode uses GitHub's public REST API. Set `GH_TOKEN` or `GITHUB_TOKEN` for a
 higher rate limit or access to pull requests visible to that token.
 
+GitHub can return HTTP 200 with `incomplete_results: true` when its search
+times out. If any page carries that flag, the REST activity report exits with
+status `2` instead of presenting a partial list as a successful report. An
+existing `--output` file remains unchanged; retry the command later. A complete
+empty response is still a valid report. This check is separate from the
+intentional `--limit` cap and does not apply to the GitHub CLI or offline sources.
+
 ## Actionable triage
 
 Triage mode groups pull requests into:
