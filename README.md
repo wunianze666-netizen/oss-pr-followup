@@ -70,7 +70,9 @@ Triage mode groups pull requests into:
 
 - **Author action needed**: requested changes, failed CI, or merge conflicts;
   unresolved inline feedback is also surfaced even when a reviewer used a
-  non-blocking `COMMENT` review
+  non-blocking `COMMENT` review; a new top-level comment from a repository
+  owner, member, or collaborator after the head commit is conservatively
+  flagged for inspection when the author has not replied
 - **Ready for maintainer**: approved, clean, and without a failing check
 - **Waiting for CI**
 - **Waiting for review**
@@ -102,10 +104,14 @@ Triage categories are evidence-based hints, not instructions to contact a
 maintainer. Always read the pull request discussion and contribution policy
 before following up. For active inline feedback, the report distinguishes a
 thread awaiting the author's reply from one where the author has replied and
-is waiting on a reviewer. Bot-only threads are conservatively flagged for
+is waiting on a reviewer. For top-level discussion, it compares the latest
+author-or-maintainer comment with the head commit and ignores bots and unrelated
+commenters; this deliberately asks for inspection rather than guessing the
+comment's intent. Bot-only review threads are conservatively flagged for
 inspection instead of being silently ignored. To stay within GitHub's GraphQL
-resource limits, triage batches 10 PRs per query, inspects up to 10 review
-threads per PR, and flags larger histories for direct inspection.
+resource limits, triage batches 10 PRs per query, inspects up to 10 discussion
+comments and review threads per PR, and flags larger review-thread histories
+for direct inspection.
 
 Scheduled jobs can turn the **Author action needed** category into a reliable
 process signal without losing the report:

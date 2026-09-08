@@ -60,6 +60,9 @@ def rich_pr(
     author_action_threads: int = 0,
     reviewer_action_threads: int = 0,
     review_threads_truncated: bool = False,
+    discussion_needs_inspection: bool = False,
+    latest_discussion_comment_author: str | None = None,
+    latest_discussion_comment_at: str | None = None,
     draft: bool = False,
 ) -> dict:
     item = pr(number, "2026-07-29T12:00:00Z", draft=draft)
@@ -71,6 +74,9 @@ def rich_pr(
             "reviewThreadAuthorActionCount": author_action_threads,
             "reviewThreadReviewerActionCount": reviewer_action_threads,
             "reviewThreadsTruncated": review_threads_truncated,
+            "discussionNeedsInspection": discussion_needs_inspection,
+            "latestDiscussionCommentAuthor": latest_discussion_comment_author,
+            "latestDiscussionCommentAt": latest_discussion_comment_at,
             "mergeStateStatus": merge,
             "ciStatus": ci,
             "triageAvailable": True,
@@ -230,6 +236,133 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(normalized["reviewThreadReviewerActionCount"], 1)
         self.assertTrue(normalized["reviewThreadsTruncated"])
         self.assertTrue(normalized["triageAvailable"])
+
+    def test_normalize_graphql_pr_flags_maintainer_comment_after_head_commit(self) -> None:
+        normalized = normalize_graphql_pr(
+            {
+                "repository": {"nameWithOwner": "example/project"},
+                "number": 42,
+                "title": "Improve API support",
+                "updatedAt": "2026-07-29T12:00:00Z",
+                "url": "https://github.com/example/project/pull/42",
+                "author": {"login": "octocat"},
+                "comments": {
+                    "totalCount": 2,
+                    "nodes": [
+                        {
+                            "author": {"login": "maintainer", "__typename": "User"},
+                            "authorAssociation": "MEMBER",
+                            "createdAt": "2026-07-29T11:00:00Z",
+                        },
+                        {
+                            "author": {"login": "review-bot", "__typename": "Bot"},
+                            "createdAt": "2026-07-29T11:30:00Z",
+                        },
+                    ],
+                },
+                "commits": {
+                    "nodes": [
+                        {
+                            "commit": {
+                                "committedDate": "2026-07-29T10:00:00Z",
+                                "statusCheckRollup": {"state": "SUCCESS"},
+                            }
+                        }
+                    ]
+                },
+            }
+        )
+
+        self.assertTrue(normalized["discussionNeedsInspection"])
+        self.assertEqual(normalized["latestDiscussionCommentAuthor"], "maintainer")
+        self.assertEqual(normalized["latestDiscussionCommentAt"], "2026-07-29T11:00:00Z")
+
+    def test_normalize_graphql_pr_clears_maintainer_comment_after_author_response(self) -> None:
+        for comments, committed_at in (
+            (
+                [
+                    {
+                        "author": {"login": "maintainer", "__typename": "User"},
+                        "authorAssociation": "COLLABORATOR",
+                        "createdAt": "2026-07-29T11:00:00Z",
+                    },
+                    {
+                        "author": {"login": "OctoCat", "__typename": "User"},
+                        "createdAt": "2026-07-29T11:30:00Z",
+                    },
+                ],
+                "2026-07-29T10:00:00Z",
+            ),
+            (
+                [
+                    {
+                        "author": {"login": "maintainer", "__typename": "User"},
+                        "authorAssociation": "OWNER",
+                        "createdAt": "2026-07-29T11:00:00Z",
+                    }
+                ],
+                "2026-07-29T12:00:00Z",
+            ),
+        ):
+            with self.subTest(comments=comments, committed_at=committed_at):
+                normalized = normalize_graphql_pr(
+                    {
+                        "repository": {"nameWithOwner": "example/project"},
+                        "number": 42,
+                        "title": "Improve API support",
+                        "updatedAt": "2026-07-29T12:00:00Z",
+                        "url": "https://github.com/example/project/pull/42",
+                        "author": {"login": "octocat"},
+                        "comments": {"totalCount": len(comments), "nodes": comments},
+                        "commits": {
+                            "nodes": [
+                                {
+                                    "commit": {
+                                        "committedDate": committed_at,
+                                        "statusCheckRollup": {"state": "SUCCESS"},
+                                    }
+                                }
+                            ]
+                        },
+                    }
+                )
+
+                self.assertFalse(normalized["discussionNeedsInspection"])
+
+    def test_normalize_graphql_pr_ignores_untrusted_automation_comment(self) -> None:
+        normalized = normalize_graphql_pr(
+            {
+                "repository": {"nameWithOwner": "example/project"},
+                "number": 42,
+                "title": "Improve API support",
+                "updatedAt": "2026-07-29T12:00:00Z",
+                "url": "https://github.com/example/project/pull/42",
+                "author": {"login": "octocat"},
+                "comments": {
+                    "totalCount": 1,
+                    "nodes": [
+                        {
+                            "author": {"login": "CLAassistant", "__typename": "User"},
+                            "authorAssociation": "NONE",
+                            "createdAt": "2026-07-29T11:00:00Z",
+                        }
+                    ],
+                },
+                "commits": {
+                    "nodes": [
+                        {
+                            "commit": {
+                                "committedDate": "2026-07-29T10:00:00Z",
+                                "statusCheckRollup": {"state": "SUCCESS"},
+                            }
+                        }
+                    ]
+                },
+            }
+        )
+
+        self.assertFalse(normalized["discussionNeedsInspection"])
+        self.assertIsNone(normalized["latestDiscussionCommentAuthor"])
 
     def test_api_fetch_paginates_until_limit(self) -> None:
         requested_pages: list[int] = []
@@ -596,6 +729,15 @@ class ReportTests(unittest.TestCase):
             ),
             (rich_pr(10, unresolved_threads=1), "author-action"),
             (rich_pr(11, review_threads_truncated=True), "author-action"),
+            (
+                rich_pr(
+                    14,
+                    discussion_needs_inspection=True,
+                    latest_discussion_comment_author="maintainer",
+                    latest_discussion_comment_at="2026-07-29T13:00:00Z",
+                ),
+                "author-action",
+            ),
             (rich_pr(5, ci="PENDING"), "waiting-ci"),
             (
                 rich_pr(6, review="APPROVED", ci="SUCCESS", merge="CLEAN"),
@@ -675,6 +817,27 @@ class ReportTests(unittest.TestCase):
 
         self.assertIn("2 unresolved review thread(s) await an author reply.", report)
         self.assertIn("review threads: 2 unresolved", report)
+
+    def test_triage_markdown_surfaces_maintainer_discussion(self) -> None:
+        data = build_report_data(
+            [
+                rich_pr(
+                    14,
+                    discussion_needs_inspection=True,
+                    latest_discussion_comment_author="maintainer",
+                    latest_discussion_comment_at="2026-07-29T13:00:00Z",
+                )
+            ],
+            author="octocat",
+            stale_after_days=14,
+            now=NOW,
+            triage=True,
+        )
+
+        report = render_markdown(data)
+
+        self.assertIn("latest maintainer discussion comment", report)
+        self.assertIn("discussion: inspect @maintainer's latest comment", report)
 
     def test_api_rate_limit_error_does_not_expose_token(self) -> None:
         def rate_limited(*_args, **_kwargs):

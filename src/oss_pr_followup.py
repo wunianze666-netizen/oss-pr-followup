@@ -26,6 +26,7 @@ GRAPHQL_PAGE_SIZE = 10
 HTTP_MAX_ATTEMPTS = 3
 HTTP_RETRY_DELAY_CAP = 10.0
 HTTP_TRANSIENT_STATUSES = frozenset({502, 503, 504})
+MAINTAINER_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 VERSION = "0.3.0"
 USER_AGENT = f"oss-pr-followup/{VERSION}"
 AUTHOR_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
@@ -51,8 +52,16 @@ query OpenPullRequestTriage($query: String!, $first: Int!, $after: String) {
         author {
           login
         }
-        comments {
+        comments(last: 10) {
           totalCount
+          nodes {
+            authorAssociation
+            author {
+              login
+              __typename
+            }
+            createdAt
+          }
         }
         labels(first: 20) {
           nodes {
@@ -82,6 +91,7 @@ query OpenPullRequestTriage($query: String!, $first: Int!, $after: String) {
         commits(last: 1) {
           nodes {
             commit {
+              committedDate
               statusCheckRollup {
                 state
               }
@@ -431,13 +441,56 @@ def normalize_graphql_pr(item: dict[str, Any]) -> dict[str, Any]:
             author_action_thread_count += 1
 
     ci_status = None
+    head_committed_at = None
     commits = item.get("commits")
     commit_nodes = commits.get("nodes", []) if isinstance(commits, dict) else []
     if commit_nodes and isinstance(commit_nodes[0], dict):
         commit = commit_nodes[0].get("commit")
+        if isinstance(commit, dict) and isinstance(commit.get("committedDate"), str):
+            head_committed_at = commit["committedDate"]
         rollup = commit.get("statusCheckRollup") if isinstance(commit, dict) else None
         if isinstance(rollup, dict) and isinstance(rollup.get("state"), str):
             ci_status = rollup["state"]
+
+    latest_discussion_comment_author = None
+    latest_discussion_comment_at = None
+    comment_nodes = comments.get("nodes", []) if isinstance(comments, dict) else []
+    for comment in comment_nodes:
+        if not isinstance(comment, dict):
+            continue
+        comment_author = comment.get("author")
+        if not isinstance(comment_author, dict) or comment_author.get("__typename") == "Bot":
+            continue
+        comment_login = comment_author.get("login")
+        comment_created_at = comment.get("createdAt")
+        if not isinstance(comment_login, str) or not comment_login:
+            continue
+        if not isinstance(comment_created_at, str) or not comment_created_at:
+            continue
+        is_author = (
+            isinstance(author_login, str)
+            and comment_login.casefold() == author_login.casefold()
+        )
+        if not is_author and comment.get("authorAssociation") not in MAINTAINER_ASSOCIATIONS:
+            continue
+        latest_discussion_comment_author = comment_login
+        latest_discussion_comment_at = comment_created_at
+
+    discussion_needs_inspection = False
+    if (
+        isinstance(author_login, str)
+        and isinstance(latest_discussion_comment_author, str)
+        and latest_discussion_comment_author.casefold() != author_login.casefold()
+    ):
+        if head_committed_at is None:
+            discussion_needs_inspection = True
+        else:
+            try:
+                discussion_needs_inspection = parse_timestamp(
+                    latest_discussion_comment_at
+                ) >= parse_timestamp(head_committed_at)
+            except ValueError:
+                discussion_needs_inspection = True
 
     return {
         "repository": {"nameWithOwner": repository.get("nameWithOwner")},
@@ -456,6 +509,9 @@ def normalize_graphql_pr(item: dict[str, Any]) -> dict[str, Any]:
         "reviewThreadsTruncated": (
             isinstance(thread_total, int) and thread_total > len(thread_nodes)
         ),
+        "discussionNeedsInspection": discussion_needs_inspection,
+        "latestDiscussionCommentAuthor": latest_discussion_comment_author,
+        "latestDiscussionCommentAt": latest_discussion_comment_at,
         "mergeStateStatus": item.get("mergeStateStatus"),
         "ciStatus": ci_status,
         "triageAvailable": True,
@@ -581,6 +637,13 @@ def report_pr(pr: dict[str, Any], now: datetime) -> dict[str, Any]:
                     "reviewThreadReviewerActionCount", 0
                 ),
                 "reviewThreadsTruncated": bool(pr.get("reviewThreadsTruncated", False)),
+                "discussionNeedsInspection": bool(
+                    pr.get("discussionNeedsInspection", False)
+                ),
+                "latestDiscussionCommentAuthor": pr.get(
+                    "latestDiscussionCommentAuthor"
+                ),
+                "latestDiscussionCommentAt": pr.get("latestDiscussionCommentAt"),
                 "mergeStateStatus": pr.get("mergeStateStatus"),
                 "ciStatus": pr.get("ciStatus"),
             }
@@ -628,6 +691,12 @@ def classify_attention(
         return "author-action", f"CI status is {signal_text(ci_status)}."
     if merge_status == "DIRTY":
         return "author-action", "The PR has merge conflicts."
+    if pr.get("discussionNeedsInspection"):
+        return (
+            "author-action",
+            "The latest maintainer discussion comment was added after the head commit; "
+            "inspect it for requested follow-up.",
+        )
     if ci_status in {"EXPECTED", "PENDING"}:
         return "waiting-ci", f"CI status is {signal_text(ci_status)}."
     if isinstance(reviewer_action_threads, int) and reviewer_action_threads > 0:
@@ -774,6 +843,10 @@ def render_pr_line(pr: dict[str, Any], *, include_triage: bool = False) -> str:
             f"review threads: {pr['unresolvedReviewThreadCount']} unresolved"
             if isinstance(pr.get("unresolvedReviewThreadCount"), int)
             and pr["unresolvedReviewThreadCount"] > 0
+            else None,
+            f"discussion: inspect @{pr['latestDiscussionCommentAuthor']}'s latest comment"
+            if pr.get("discussionNeedsInspection")
+            and isinstance(pr.get("latestDiscussionCommentAuthor"), str)
             else None,
         ]
         signal_summary = "; ".join(signal for signal in signals if signal)
