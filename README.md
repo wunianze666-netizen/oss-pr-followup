@@ -27,14 +27,17 @@ fed into another script.
 
 The default activity report works for public accounts without authentication.
 Optional triage mode uses one batched GraphQL query per page to add review, CI,
-merge, unresolved review-thread, and next-action signals.
+merge, unresolved review-thread, and next-action signals. Failed CI rollups
+include the concrete failing check names, results, and details URLs in JSON, so
+operators can investigate specific jobs instead of receiving only a generic
+failure flag.
 
 ## Install
 
 Install the current release directly from GitHub:
 
 ```bash
-python -m pip install "git+https://github.com/wunianze666-netizen/oss-pr-followup.git@v0.3.0"
+python -m pip install "git+https://github.com/wunianze666-netizen/oss-pr-followup.git@v0.4.0"
 ```
 
 Python 3.10 or later is required. GitHub CLI is optional.
@@ -102,7 +105,11 @@ Private pull requests appear only when the token can read their repositories.
 
 Triage categories are evidence-based hints, not instructions to contact a
 maintainer. Always read the pull request discussion and contribution policy
-before following up. For active inline feedback, the report distinguishes a
+before following up. For failed CI, Markdown shows up to three failed check
+names while JSON retains every failure returned in the query window, including
+its conclusion and details URL. A truncation signal is emitted when a commit has
+more than 50 check contexts, rather than silently implying that the visible list
+is complete. For active inline feedback, the report distinguishes a
 thread awaiting the author's reply from one where the author has replied and
 is waiting on a reviewer. For top-level discussion, it compares the latest
 author-or-maintainer comment with the head commit and ignores bots and unrelated

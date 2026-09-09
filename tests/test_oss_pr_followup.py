@@ -63,6 +63,8 @@ def rich_pr(
     discussion_needs_inspection: bool = False,
     latest_discussion_comment_author: str | None = None,
     latest_discussion_comment_at: str | None = None,
+    failed_checks: list[dict] | None = None,
+    check_contexts_truncated: bool = False,
     draft: bool = False,
 ) -> dict:
     item = pr(number, "2026-07-29T12:00:00Z", draft=draft)
@@ -79,6 +81,8 @@ def rich_pr(
             "latestDiscussionCommentAt": latest_discussion_comment_at,
             "mergeStateStatus": merge,
             "ciStatus": ci,
+            "failedChecks": failed_checks or [],
+            "checkContextsTruncated": check_contexts_truncated,
             "triageAvailable": True,
         }
     )
@@ -219,7 +223,34 @@ class ReportTests(unittest.TestCase):
                     "nodes": [
                         {
                             "commit": {
-                                "statusCheckRollup": {"state": "FAILURE"},
+                                "statusCheckRollup": {
+                                    "state": "FAILURE",
+                                    "contexts": {
+                                        "totalCount": 4,
+                                        "nodes": [
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "unit-tests",
+                                                "status": "COMPLETED",
+                                                "conclusion": "FAILURE",
+                                                "detailsUrl": "https://github.com/example/project/actions/runs/1",
+                                            },
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "lint",
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS",
+                                                "detailsUrl": "https://github.com/example/project/actions/runs/2",
+                                            },
+                                            {
+                                                "__typename": "StatusContext",
+                                                "context": "external/build",
+                                                "state": "ERROR",
+                                                "targetUrl": "https://ci.example.test/build/42",
+                                            },
+                                        ],
+                                    },
+                                },
                             }
                         }
                     ]
@@ -231,6 +262,22 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(normalized["reviewDecision"], "CHANGES_REQUESTED")
         self.assertEqual(normalized["reviewRequestCount"], 1)
         self.assertEqual(normalized["ciStatus"], "FAILURE")
+        self.assertEqual(
+            normalized["failedChecks"],
+            [
+                {
+                    "name": "unit-tests",
+                    "result": "FAILURE",
+                    "url": "https://github.com/example/project/actions/runs/1",
+                },
+                {
+                    "name": "external/build",
+                    "result": "ERROR",
+                    "url": "https://ci.example.test/build/42",
+                },
+            ],
+        )
+        self.assertTrue(normalized["checkContextsTruncated"])
         self.assertEqual(normalized["unresolvedReviewThreadCount"], 3)
         self.assertEqual(normalized["reviewThreadAuthorActionCount"], 1)
         self.assertEqual(normalized["reviewThreadReviewerActionCount"], 1)
@@ -364,6 +411,44 @@ class ReportTests(unittest.TestCase):
         self.assertFalse(normalized["discussionNeedsInspection"])
         self.assertIsNone(normalized["latestDiscussionCommentAuthor"])
 
+    def test_normalize_graphql_pr_ignores_old_failures_after_rollup_recovers(self) -> None:
+        normalized = normalize_graphql_pr(
+            {
+                "repository": {"nameWithOwner": "example/project"},
+                "number": 42,
+                "title": "Improve API support",
+                "updatedAt": "2026-07-29T12:00:00Z",
+                "url": "https://github.com/example/project/pull/42",
+                "commits": {
+                    "nodes": [
+                        {
+                            "commit": {
+                                "statusCheckRollup": {
+                                    "state": "SUCCESS",
+                                    "contexts": {
+                                        "totalCount": 1,
+                                        "nodes": [
+                                            {
+                                                "__typename": "CheckRun",
+                                                "name": "superseded run",
+                                                "status": "COMPLETED",
+                                                "conclusion": "FAILURE",
+                                                "detailsUrl": "https://github.com/example/project/actions/runs/1",
+                                            }
+                                        ],
+                                    },
+                                }
+                            }
+                        }
+                    ]
+                },
+            }
+        )
+
+        self.assertEqual(normalized["ciStatus"], "SUCCESS")
+        self.assertEqual(normalized["failedChecks"], [])
+        self.assertFalse(normalized["checkContextsTruncated"])
+
     def test_api_fetch_paginates_until_limit(self) -> None:
         requested_pages: list[int] = []
         requested_page_sizes: list[int] = []
@@ -474,6 +559,7 @@ class ReportTests(unittest.TestCase):
 
         def request_graphql(_query: str, variables: dict, *, token: str) -> dict:
             self.assertEqual(token, "secret")
+            self.assertEqual(variables["checkContextsFirst"], 50)
             cursors.append(variables["after"])
             page_sizes.append(variables["first"])
             start = sum(page_sizes[:-1])
@@ -776,6 +862,44 @@ class ReportTests(unittest.TestCase):
         self.assertIn("review: changes requested", report)
         self.assertEqual(data["triageCounts"]["author-action"], 1)
         self.assertNotIn("recent", data)
+
+    def test_triage_surfaces_failed_check_evidence(self) -> None:
+        failed_checks = [
+            {
+                "name": "test [windows]",
+                "result": "FAILURE",
+                "url": "https://github.com/example/project/actions/runs/1",
+            },
+            {
+                "name": "typecheck",
+                "result": "TIMED_OUT",
+                "url": None,
+            },
+        ]
+        data = build_report_data(
+            [
+                rich_pr(
+                    15,
+                    ci="FAILURE",
+                    failed_checks=failed_checks,
+                    check_contexts_truncated=True,
+                )
+            ],
+            author="octocat",
+            stale_after_days=14,
+            now=NOW,
+            triage=True,
+        )
+
+        pull_request = data["pullRequests"][0]
+        report = render_markdown(data)
+
+        self.assertEqual(pull_request["failedChecks"], failed_checks)
+        self.assertTrue(pull_request["checkContextsTruncated"])
+        self.assertIn("2 visible CI checks failed", pull_request["attentionReason"])
+        self.assertIn("test [windows]", pull_request["attentionReason"])
+        self.assertIn(r"failed checks: test \[windows\], typecheck", report)
+        self.assertIn("check contexts: truncated", report)
 
     def test_behind_branch_does_not_invent_author_action(self) -> None:
         data = build_report_data(

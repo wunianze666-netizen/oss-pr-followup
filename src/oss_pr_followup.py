@@ -23,16 +23,33 @@ PR_FIELDS = "repository,number,title,updatedAt,url,commentsCount,labels,isDraft"
 API_ROOT = "https://api.github.com"
 GRAPHQL_URL = f"{API_ROOT}/graphql"
 GRAPHQL_PAGE_SIZE = 10
+CHECK_CONTEXT_PAGE_SIZE = 50
 HTTP_MAX_ATTEMPTS = 3
 HTTP_RETRY_DELAY_CAP = 10.0
 HTTP_TRANSIENT_STATUSES = frozenset({502, 503, 504})
 MAINTAINER_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
-VERSION = "0.3.0"
+FAILED_CHECK_RUN_CONCLUSIONS = frozenset(
+    {
+        "ACTION_REQUIRED",
+        "CANCELLED",
+        "FAILURE",
+        "STALE",
+        "STARTUP_FAILURE",
+        "TIMED_OUT",
+    }
+)
+FAILED_STATUS_CONTEXT_STATES = frozenset({"ERROR", "FAILURE"})
+VERSION = "0.4.0"
 USER_AGENT = f"oss-pr-followup/{VERSION}"
 AUTHOR_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 UTC = timezone.utc
 TRIAGE_QUERY = """
-query OpenPullRequestTriage($query: String!, $first: Int!, $after: String) {
+query OpenPullRequestTriage(
+  $query: String!
+  $first: Int!
+  $after: String
+  $checkContextsFirst: Int!
+) {
   search(query: $query, type: ISSUE, first: $first, after: $after) {
     issueCount
     pageInfo {
@@ -94,6 +111,23 @@ query OpenPullRequestTriage($query: String!, $first: Int!, $after: String) {
               committedDate
               statusCheckRollup {
                 state
+                contexts(first: $checkContextsFirst) {
+                  totalCount
+                  nodes {
+                    __typename
+                    ... on CheckRun {
+                      name
+                      status
+                      conclusion
+                      detailsUrl
+                    }
+                    ... on StatusContext {
+                      context
+                      state
+                      targetUrl
+                    }
+                  }
+                }
               }
             }
           }
@@ -157,6 +191,48 @@ def parse_timestamp(value: str) -> datetime:
     """Parse an ISO-8601 timestamp from GitHub."""
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def failed_check_contexts(rollup: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+    """Extract concrete failing checks from a status rollup."""
+    contexts = rollup.get("contexts")
+    if not isinstance(contexts, dict):
+        return [], False
+
+    nodes = contexts.get("nodes")
+    if not isinstance(nodes, list):
+        nodes = []
+    total_count = contexts.get("totalCount", len(nodes))
+    truncated = isinstance(total_count, int) and total_count > len(nodes)
+    failures: list[dict[str, Any]] = []
+
+    for context in nodes:
+        if not isinstance(context, dict):
+            continue
+        typename = context.get("__typename")
+        if typename == "CheckRun":
+            name = context.get("name")
+            result = context.get("conclusion")
+            url = context.get("detailsUrl")
+            failed = result in FAILED_CHECK_RUN_CONCLUSIONS
+        elif typename == "StatusContext":
+            name = context.get("context")
+            result = context.get("state")
+            url = context.get("targetUrl")
+            failed = result in FAILED_STATUS_CONTEXT_STATES
+        else:
+            continue
+        if not failed or not isinstance(name, str) or not name:
+            continue
+        failures.append(
+            {
+                "name": name,
+                "result": result,
+                "url": url if isinstance(url, str) and url else None,
+            }
+        )
+
+    return failures, truncated
 
 
 def run_gh(arguments: Sequence[str]) -> str:
@@ -441,6 +517,8 @@ def normalize_graphql_pr(item: dict[str, Any]) -> dict[str, Any]:
             author_action_thread_count += 1
 
     ci_status = None
+    failed_checks: list[dict[str, Any]] = []
+    check_contexts_truncated = False
     head_committed_at = None
     commits = item.get("commits")
     commit_nodes = commits.get("nodes", []) if isinstance(commits, dict) else []
@@ -449,8 +527,13 @@ def normalize_graphql_pr(item: dict[str, Any]) -> dict[str, Any]:
         if isinstance(commit, dict) and isinstance(commit.get("committedDate"), str):
             head_committed_at = commit["committedDate"]
         rollup = commit.get("statusCheckRollup") if isinstance(commit, dict) else None
-        if isinstance(rollup, dict) and isinstance(rollup.get("state"), str):
-            ci_status = rollup["state"]
+        if isinstance(rollup, dict):
+            if isinstance(rollup.get("state"), str):
+                ci_status = rollup["state"]
+            failed_checks, check_contexts_truncated = failed_check_contexts(rollup)
+            if ci_status not in {"ERROR", "FAILURE"}:
+                failed_checks = []
+                check_contexts_truncated = False
 
     latest_discussion_comment_author = None
     latest_discussion_comment_at = None
@@ -514,6 +597,8 @@ def normalize_graphql_pr(item: dict[str, Any]) -> dict[str, Any]:
         "latestDiscussionCommentAt": latest_discussion_comment_at,
         "mergeStateStatus": item.get("mergeStateStatus"),
         "ciStatus": ci_status,
+        "failedChecks": failed_checks,
+        "checkContextsTruncated": check_contexts_truncated,
         "triageAvailable": True,
     }
 
@@ -533,6 +618,7 @@ def fetch_open_prs_graphql(
             "query": f"is:pr is:open author:{author} sort:updated-desc",
             "first": min(GRAPHQL_PAGE_SIZE, limit - len(results)),
             "after": cursor,
+            "checkContextsFirst": CHECK_CONTEXT_PAGE_SIZE,
         }
         data = request_graphql(TRIAGE_QUERY, variables, token=token)
         search = data.get("search")
@@ -646,9 +732,51 @@ def report_pr(pr: dict[str, Any], now: datetime) -> dict[str, Any]:
                 "latestDiscussionCommentAt": pr.get("latestDiscussionCommentAt"),
                 "mergeStateStatus": pr.get("mergeStateStatus"),
                 "ciStatus": pr.get("ciStatus"),
+                "failedChecks": [
+                    {
+                        "name": check["name"],
+                        "result": check["result"],
+                        "url": check.get("url")
+                        if isinstance(check.get("url"), str)
+                        else None,
+                    }
+                    for check in pr.get("failedChecks", [])
+                    if isinstance(check, dict)
+                    and isinstance(check.get("name"), str)
+                    and isinstance(check.get("result"), str)
+                ],
+                "checkContextsTruncated": bool(
+                    pr.get("checkContextsTruncated", False)
+                ),
             }
         )
     return normalized
+
+
+def ci_failure_reason(pr: dict[str, Any], ci_status: str) -> str:
+    failures = pr.get("failedChecks", [])
+    if not isinstance(failures, list) or not failures:
+        return f"CI status is {signal_text(ci_status)}."
+
+    names = [
+        check["name"]
+        for check in failures
+        if isinstance(check, dict) and isinstance(check.get("name"), str)
+    ]
+    if not names:
+        return f"CI status is {signal_text(ci_status)}."
+
+    visible = "visible " if pr.get("checkContextsTruncated") else ""
+    noun = "check" if len(names) == 1 else "checks"
+    summary = ", ".join(names[:3])
+    if len(names) > 3:
+        summary += f", and {len(names) - 3} more"
+    suffix = (
+        " Inspect the remaining check contexts."
+        if pr.get("checkContextsTruncated")
+        else ""
+    )
+    return f"{len(names)} {visible}CI {noun} failed: {summary}.{suffix}"
 
 
 def classify_attention(
@@ -688,7 +816,7 @@ def classify_attention(
     ):
         return "author-action", "An unresolved review thread needs inspection."
     if ci_status in {"ERROR", "FAILURE"}:
-        return "author-action", f"CI status is {signal_text(ci_status)}."
+        return "author-action", ci_failure_reason(pr, ci_status)
     if merge_status == "DIRTY":
         return "author-action", "The PR has merge conflicts."
     if pr.get("discussionNeedsInspection"):
@@ -836,6 +964,17 @@ def render_pr_line(pr: dict[str, Any], *, include_triage: bool = False) -> str:
             else None,
             f"CI: {signal_text(pr['ciStatus'])}"
             if isinstance(pr.get("ciStatus"), str)
+            else None,
+            "failed checks: "
+            + ", ".join(
+                markdown_link_text(check["name"])
+                for check in pr.get("failedChecks", [])[:3]
+                if isinstance(check, dict) and isinstance(check.get("name"), str)
+            )
+            if pr.get("failedChecks")
+            else None,
+            "check contexts: truncated"
+            if pr.get("checkContextsTruncated")
             else None,
             f"merge: {signal_text(pr['mergeStateStatus'])}"
             if isinstance(pr.get("mergeStateStatus"), str)
