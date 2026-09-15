@@ -40,7 +40,7 @@ FAILED_CHECK_RUN_CONCLUSIONS = frozenset(
 )
 FAILED_STATUS_CONTEXT_STATES = frozenset({"ERROR", "FAILURE"})
 CONCRETE_CI_FAILURE_RESULTS = frozenset({"ERROR", "FAILURE"})
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 USER_AGENT = f"oss-pr-followup/{VERSION}"
 AUTHOR_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 UTC = timezone.utc
@@ -1049,14 +1049,16 @@ def render_pr_line(pr: dict[str, Any], *, include_triage: bool = False) -> str:
             else None,
         ]
         signal_summary = "; ".join(signal for signal in signals if signal)
-        line += f". {pr['attentionReason']}"
+        line += f". {markdown_link_text(pr['attentionReason'])}"
         if signal_summary:
             line += f" Signals: {signal_summary}."
     return line
 
 
 def markdown_link_text(value: str) -> str:
-    """Escape untrusted text used inside a Markdown link label."""
+    """Keep untrusted GitHub text on one escaped Markdown line."""
+    value = re.sub(r"[\x00-\x1f\x7f]+", " ", value)
+    value = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     return value.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
 
 

@@ -38,7 +38,7 @@ mistake incomplete infrastructure work for a source-code failure.
 Install the current release directly from GitHub:
 
 ```bash
-python -m pip install "git+https://github.com/wunianze666-netizen/oss-pr-followup.git@v0.5.0"
+python -m pip install "git+https://github.com/wunianze666-netizen/oss-pr-followup.git@v0.5.1"
 ```
 
 Python 3.10 or later is required. GitHub CLI is optional.
@@ -194,6 +194,11 @@ and sends it only to `api.github.com`. It does not print, persist, or transmit
 the token elsewhere. There is no telemetry, remote database, or stored account
 data. Generated `report.md` files are ignored by default because private PR
 titles and links may appear in authenticated reports.
+
+Markdown rendering treats pull request titles, check names, and derived
+attention reasons as untrusted text. ASCII control characters are collapsed to
+spaces, HTML delimiters are encoded, and link-label brackets are escaped so a
+repository-controlled check name cannot inject a forged report entry.
 
 See [SECURITY.md](SECURITY.md) for private vulnerability reporting and token
 handling guidance.

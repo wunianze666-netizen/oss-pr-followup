@@ -910,6 +910,33 @@ class ReportTests(unittest.TestCase):
         self.assertIn(r"non-success checks: test \[windows\], typecheck", report)
         self.assertIn("check contexts: truncated", report)
 
+    def test_triage_markdown_neutralizes_check_name_injection(self) -> None:
+        injected_name = "tests\n- [forged action](https://example.invalid)<script>"
+        data = build_report_data(
+            [
+                rich_pr(
+                    19,
+                    ci="FAILURE",
+                    failed_checks=[
+                        {"name": injected_name, "result": "FAILURE", "url": None}
+                    ],
+                )
+            ],
+            author="octocat",
+            stale_after_days=14,
+            now=NOW,
+            triage=True,
+        )
+
+        report = render_markdown(data)
+
+        self.assertNotIn("\n- [forged action]", report)
+        self.assertNotIn("<script>", report)
+        self.assertIn(
+            r"tests - \[forged action\](https://example.invalid)&lt;script&gt;",
+            report,
+        )
+
     def test_triage_does_not_treat_cancelled_checks_as_author_action(self) -> None:
         data = build_report_data(
             [
