@@ -39,7 +39,8 @@ FAILED_CHECK_RUN_CONCLUSIONS = frozenset(
     }
 )
 FAILED_STATUS_CONTEXT_STATES = frozenset({"ERROR", "FAILURE"})
-VERSION = "0.4.0"
+CONCRETE_CI_FAILURE_RESULTS = frozenset({"ERROR", "FAILURE"})
+VERSION = "0.5.0"
 USER_AGENT = f"oss-pr-followup/{VERSION}"
 AUTHOR_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 UTC = timezone.utc
@@ -144,6 +145,11 @@ TRIAGE_SECTIONS = (
         "Address these before waiting for another maintainer response.",
     ),
     (
+        "ci-investigation",
+        "CI needs investigation",
+        "These runs did not provide concrete failure evidence; inspect their logs before changing source code.",
+    ),
+    (
         "ready-for-maintainer",
         "Ready for maintainer",
         "Approval and checks look ready; repository policy still determines whether the PR can merge.",
@@ -194,7 +200,7 @@ def parse_timestamp(value: str) -> datetime:
 
 
 def failed_check_contexts(rollup: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
-    """Extract concrete failing checks from a status rollup."""
+    """Extract non-successful check contexts from a status rollup."""
     contexts = rollup.get("contexts")
     if not isinstance(contexts, dict):
         return [], False
@@ -754,8 +760,16 @@ def report_pr(pr: dict[str, Any], now: datetime) -> dict[str, Any]:
 
 
 def ci_failure_reason(pr: dict[str, Any], ci_status: str) -> str:
-    failures = pr.get("failedChecks", [])
-    if not isinstance(failures, list) or not failures:
+    checks = pr.get("failedChecks", [])
+    if not isinstance(checks, list):
+        checks = []
+    failures = [
+        check
+        for check in checks
+        if isinstance(check, dict)
+        and check.get("result") in CONCRETE_CI_FAILURE_RESULTS
+    ]
+    if not failures:
         return f"CI status is {signal_text(ci_status)}."
 
     names = [
@@ -776,7 +790,45 @@ def ci_failure_reason(pr: dict[str, Any], ci_status: str) -> str:
         if pr.get("checkContextsTruncated")
         else ""
     )
-    return f"{len(names)} {visible}CI {noun} failed: {summary}.{suffix}"
+    return f"{len(names)} {visible}CI {noun} reported failure: {summary}.{suffix}"
+
+
+def ci_investigation_reason(pr: dict[str, Any], ci_status: str) -> str:
+    """Explain why a failed rollup does not yet prove author action is needed."""
+    checks = pr.get("failedChecks", [])
+    if not isinstance(checks, list) or not checks:
+        return (
+            f"CI rollup is {signal_text(ci_status)}, but no concrete failed check is "
+            "visible. Inspect the workflow before changing source code."
+        )
+
+    outcomes = []
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        name = check.get("name")
+        result = check.get("result")
+        if not isinstance(name, str) or not isinstance(result, str):
+            continue
+        outcomes.append(f"{name} ({signal_text(result)})")
+    if not outcomes:
+        return (
+            f"CI rollup is {signal_text(ci_status)}, but no concrete failed check is "
+            "visible. Inspect the workflow before changing source code."
+        )
+
+    summary = ", ".join(outcomes[:3])
+    if len(outcomes) > 3:
+        summary += f", and {len(outcomes) - 3} more"
+    suffix = (
+        " Additional check contexts were not returned."
+        if pr.get("checkContextsTruncated")
+        else ""
+    )
+    return (
+        f"CI did not complete cleanly, but only non-concrete outcomes are visible: "
+        f"{summary}.{suffix} Inspect the workflow before changing source code."
+    )
 
 
 def classify_attention(
@@ -815,7 +867,13 @@ def classify_attention(
         and unresolved_threads > classified_threads
     ):
         return "author-action", "An unresolved review thread needs inspection."
-    if ci_status in {"ERROR", "FAILURE"}:
+    failed_checks = pr.get("failedChecks", [])
+    has_concrete_ci_failure = isinstance(failed_checks, list) and any(
+        isinstance(check, dict)
+        and check.get("result") in CONCRETE_CI_FAILURE_RESULTS
+        for check in failed_checks
+    )
+    if ci_status in {"ERROR", "FAILURE"} and has_concrete_ci_failure:
         return "author-action", ci_failure_reason(pr, ci_status)
     if merge_status == "DIRTY":
         return "author-action", "The PR has merge conflicts."
@@ -825,6 +883,8 @@ def classify_attention(
             "The latest maintainer discussion comment was added after the head commit; "
             "inspect it for requested follow-up.",
         )
+    if ci_status in {"ERROR", "FAILURE"}:
+        return "ci-investigation", ci_investigation_reason(pr, ci_status)
     if ci_status in {"EXPECTED", "PENDING"}:
         return "waiting-ci", f"CI status is {signal_text(ci_status)}."
     if isinstance(reviewer_action_threads, int) and reviewer_action_threads > 0:
@@ -965,7 +1025,7 @@ def render_pr_line(pr: dict[str, Any], *, include_triage: bool = False) -> str:
             f"CI: {signal_text(pr['ciStatus'])}"
             if isinstance(pr.get("ciStatus"), str)
             else None,
-            "failed checks: "
+            "non-success checks: "
             + ", ".join(
                 markdown_link_text(check["name"])
                 for check in pr.get("failedChecks", [])[:3]

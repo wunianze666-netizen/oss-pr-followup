@@ -27,17 +27,18 @@ fed into another script.
 
 The default activity report works for public accounts without authentication.
 Optional triage mode uses one batched GraphQL query per page to add review, CI,
-merge, unresolved review-thread, and next-action signals. Failed CI rollups
-include the concrete failing check names, results, and details URLs in JSON, so
-operators can investigate specific jobs instead of receiving only a generic
-failure flag.
+merge, unresolved review-thread, and next-action signals. Non-successful CI
+rollups include the concrete check names, results, and details URLs in JSON.
+The classifier separates explicit `FAILURE`/`ERROR` evidence from cancelled,
+timed-out, approval-gated, stale, or startup-failed runs, so automation does not
+mistake incomplete infrastructure work for a source-code failure.
 
 ## Install
 
 Install the current release directly from GitHub:
 
 ```bash
-python -m pip install "git+https://github.com/wunianze666-netizen/oss-pr-followup.git@v0.4.0"
+python -m pip install "git+https://github.com/wunianze666-netizen/oss-pr-followup.git@v0.5.0"
 ```
 
 Python 3.10 or later is required. GitHub CLI is optional.
@@ -71,11 +72,15 @@ intentional `--limit` cap and does not apply to the GitHub CLI or offline source
 
 Triage mode groups pull requests into:
 
-- **Author action needed**: requested changes, failed CI, or merge conflicts;
+- **Author action needed**: requested changes, CI with a concrete
+  `FAILURE`/`ERROR` result, or merge conflicts;
   unresolved inline feedback is also surfaced even when a reviewer used a
   non-blocking `COMMENT` review; a new top-level comment from a repository
   owner, member, or collaborator after the head commit is conservatively
   flagged for inspection when the author has not replied
+- **CI needs investigation**: the aggregate rollup is unsuccessful, but the
+  visible checks are cancelled, timed out, approval-gated, stale, startup
+  failures, or absent; inspect logs before changing source code
 - **Ready for maintainer**: approved, clean, and without a failing check
 - **Waiting for CI**
 - **Waiting for review**
@@ -105,11 +110,14 @@ Private pull requests appear only when the token can read their repositories.
 
 Triage categories are evidence-based hints, not instructions to contact a
 maintainer. Always read the pull request discussion and contribution policy
-before following up. For failed CI, Markdown shows up to three failed check
-names while JSON retains every failure returned in the query window, including
-its conclusion and details URL. A truncation signal is emitted when a commit has
-more than 50 check contexts, rather than silently implying that the visible list
-is complete. For active inline feedback, the report distinguishes a
+before following up. For unsuccessful CI, Markdown shows up to three
+non-successful check names while JSON retains every affected check returned in
+the query window, including its conclusion and details URL. Only an explicit
+`FAILURE` or `ERROR` result enters **Author action needed**; incomplete or
+ambiguous outcomes enter **CI needs investigation** and do not trigger
+`--fail-on-author-action`. A truncation signal is emitted when a commit has more
+than 50 check contexts, rather than silently implying that the visible list is
+complete. For active inline feedback, the report distinguishes a
 thread awaiting the author's reply from one where the author has replied and
 is waiting on a reviewer. For top-level discussion, it compares the latest
 author-or-maintainer comment with the head commit and ignores bots and unrelated

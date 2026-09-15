@@ -803,7 +803,16 @@ class ReportTests(unittest.TestCase):
         cases = (
             (rich_pr(1, draft=True), "draft"),
             (rich_pr(2, review="CHANGES_REQUESTED"), "author-action"),
-            (rich_pr(3, ci="FAILURE"), "author-action"),
+            (
+                rich_pr(
+                    3,
+                    ci="FAILURE",
+                    failed_checks=[
+                        {"name": "tests", "result": "FAILURE", "url": None}
+                    ],
+                ),
+                "author-action",
+            ),
             (rich_pr(4, merge="DIRTY"), "author-action"),
             (
                 rich_pr(8, unresolved_threads=1, author_action_threads=1),
@@ -896,10 +905,83 @@ class ReportTests(unittest.TestCase):
 
         self.assertEqual(pull_request["failedChecks"], failed_checks)
         self.assertTrue(pull_request["checkContextsTruncated"])
-        self.assertIn("2 visible CI checks failed", pull_request["attentionReason"])
+        self.assertIn("1 visible CI check reported failure", pull_request["attentionReason"])
         self.assertIn("test [windows]", pull_request["attentionReason"])
-        self.assertIn(r"failed checks: test \[windows\], typecheck", report)
+        self.assertIn(r"non-success checks: test \[windows\], typecheck", report)
         self.assertIn("check contexts: truncated", report)
+
+    def test_triage_does_not_treat_cancelled_checks_as_author_action(self) -> None:
+        data = build_report_data(
+            [
+                rich_pr(
+                    16,
+                    ci="FAILURE",
+                    failed_checks=[
+                        {
+                            "name": "openapi-checks",
+                            "result": "CANCELLED",
+                            "url": "https://github.com/example/project/actions/runs/2",
+                        },
+                        {
+                            "name": "typegen-checks",
+                            "result": "TIMED_OUT",
+                            "url": "https://github.com/example/project/actions/runs/3",
+                        },
+                    ],
+                )
+            ],
+            author="octocat",
+            stale_after_days=14,
+            now=NOW,
+            triage=True,
+        )
+
+        pull_request = data["pullRequests"][0]
+        report = render_markdown(data)
+
+        self.assertEqual(pull_request["attentionCategory"], "ci-investigation")
+        self.assertEqual(data["triageCounts"]["author-action"], 0)
+        self.assertIn("cancelled", pull_request["attentionReason"].lower())
+        self.assertIn("timed out", pull_request["attentionReason"].lower())
+        self.assertIn("## CI needs investigation (1)", report)
+
+    def test_triage_investigates_failed_rollup_without_check_evidence(self) -> None:
+        data = build_report_data(
+            [rich_pr(17, ci="FAILURE")],
+            author="octocat",
+            stale_after_days=14,
+            now=NOW,
+            triage=True,
+        )
+
+        pull_request = data["pullRequests"][0]
+
+        self.assertEqual(pull_request["attentionCategory"], "ci-investigation")
+        self.assertEqual(data["triageCounts"]["author-action"], 0)
+        self.assertIn("no concrete failed check", pull_request["attentionReason"].lower())
+
+    def test_merge_conflict_takes_priority_over_inconclusive_ci(self) -> None:
+        data = build_report_data(
+            [
+                rich_pr(
+                    18,
+                    ci="FAILURE",
+                    merge="DIRTY",
+                    failed_checks=[
+                        {"name": "tests", "result": "CANCELLED", "url": None}
+                    ],
+                )
+            ],
+            author="octocat",
+            stale_after_days=14,
+            now=NOW,
+            triage=True,
+        )
+
+        pull_request = data["pullRequests"][0]
+
+        self.assertEqual(pull_request["attentionCategory"], "author-action")
+        self.assertEqual(pull_request["attentionReason"], "The PR has merge conflicts.")
 
     def test_behind_branch_does_not_invent_author_action(self) -> None:
         data = build_report_data(
@@ -1149,6 +1231,40 @@ class ReportTests(unittest.TestCase):
             )
 
         self.assertEqual(status, 0)
+
+    def test_main_does_not_fail_for_cancelled_ci_without_failure_evidence(self) -> None:
+        stdout = io.StringIO()
+        with (
+            patch.dict(os.environ, {"GH_TOKEN": "secret"}, clear=True),
+            patch(
+                "oss_pr_followup.fetch_open_prs_graphql",
+                return_value=[
+                    rich_pr(
+                        10,
+                        ci="FAILURE",
+                        failed_checks=[
+                            {
+                                "name": "typegen-checks",
+                                "result": "CANCELLED",
+                                "url": None,
+                            }
+                        ],
+                    )
+                ],
+            ),
+            redirect_stdout(stdout),
+        ):
+            status = main(
+                [
+                    "--author",
+                    "octocat",
+                    "--triage",
+                    "--fail-on-author-action",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        self.assertIn("## CI needs investigation (1)", stdout.getvalue())
 
     def test_fail_on_author_action_requires_triage_mode(self) -> None:
         stderr = io.StringIO()
