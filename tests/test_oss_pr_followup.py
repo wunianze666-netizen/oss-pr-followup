@@ -489,6 +489,36 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(len(prs), 150)
         self.assertEqual(prs[-1]["number"], 150)
 
+    def test_api_fetch_deduplicates_prs_that_move_between_pages(self) -> None:
+        requested_pages: list[int] = []
+
+        def request_json(url: str, *, token: str | None) -> dict:
+            page = int(parse_qs(urlparse(url).query)["page"][0])
+            requested_pages.append(page)
+            numbers = list(range(1, 101)) if page == 1 else [100, 101]
+            return {
+                "total_count": 101,
+                "items": [
+                    {
+                        "repository_url": "https://api.github.com/repos/example/project",
+                        "number": number,
+                        "title": f"PR {number}",
+                        "updated_at": "2026-07-29T12:00:00Z",
+                        "html_url": f"https://github.com/example/project/pull/{number}",
+                    }
+                    for number in numbers
+                ],
+            }
+
+        prs = fetch_open_prs_api(
+            "octocat",
+            limit=101,
+            request_json=request_json,
+        )
+
+        self.assertEqual(requested_pages, [1, 2])
+        self.assertEqual([item["number"] for item in prs], list(range(1, 102)))
+
     def test_api_fetch_rejects_incomplete_search_pages(self) -> None:
         for incomplete_page, empty in ((1, True), (1, False), (2, False)):
             with self.subTest(incomplete_page=incomplete_page, empty=empty):
@@ -597,6 +627,88 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(cursors, [None, "next-page"])
         self.assertEqual(page_sizes, [10, 1])
         self.assertEqual([item["number"] for item in prs], list(range(1, 12)))
+
+    def test_graphql_fetch_continues_after_duplicate_cursor_page(self) -> None:
+        cursors: list[str | None] = []
+
+        def request_graphql(_query: str, variables: dict, *, token: str) -> dict:
+            cursors.append(variables["after"])
+            pages = (
+                (list(range(1, 11)), True, "after-first"),
+                ([10], True, "after-duplicate"),
+                ([11], False, None),
+            )
+            numbers, has_next_page, end_cursor = pages[len(cursors) - 1]
+            return {
+                "search": {
+                    "nodes": [
+                        {
+                            "repository": {"nameWithOwner": "example/project"},
+                            "number": number,
+                            "title": f"PR {number}",
+                            "updatedAt": "2026-07-29T12:00:00Z",
+                            "url": f"https://github.com/example/project/pull/{number}",
+                            "comments": {"totalCount": 0},
+                            "labels": {"nodes": []},
+                            "reviewRequests": {"totalCount": 0},
+                            "commits": {"nodes": []},
+                        }
+                        for number in numbers
+                    ],
+                    "pageInfo": {
+                        "hasNextPage": has_next_page,
+                        "endCursor": end_cursor,
+                    },
+                }
+            }
+
+        prs = fetch_open_prs_graphql(
+            "octocat",
+            limit=11,
+            token="secret",
+            request_graphql=request_graphql,
+        )
+
+        self.assertEqual(cursors, [None, "after-first", "after-duplicate"])
+        self.assertEqual([item["number"] for item in prs], list(range(1, 12)))
+
+    def test_graphql_fetch_rejects_repeated_cursor(self) -> None:
+        calls = 0
+
+        def request_graphql(_query: str, variables: dict, *, token: str) -> dict:
+            nonlocal calls
+            calls += 1
+            return {
+                "search": {
+                    "nodes": [
+                        {
+                            "repository": {"nameWithOwner": "example/project"},
+                            "number": 1,
+                            "title": "PR 1",
+                            "updatedAt": "2026-07-29T12:00:00Z",
+                            "url": "https://github.com/example/project/pull/1",
+                            "comments": {"totalCount": 0},
+                            "labels": {"nodes": []},
+                            "reviewRequests": {"totalCount": 0},
+                            "commits": {"nodes": []},
+                        }
+                    ],
+                    "pageInfo": {
+                        "hasNextPage": True,
+                        "endCursor": "unchanged",
+                    },
+                }
+            }
+
+        with self.assertRaisesRegex(CLIError, "repeated.*cursor"):
+            fetch_open_prs_graphql(
+                "octocat",
+                limit=2,
+                token="secret",
+                request_graphql=request_graphql,
+            )
+
+        self.assertEqual(calls, 2)
 
     def test_graphql_request_posts_token_and_variables(self) -> None:
         class Response:

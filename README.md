@@ -38,7 +38,7 @@ mistake incomplete infrastructure work for a source-code failure.
 Install the current release directly from GitHub:
 
 ```bash
-python -m pip install "git+https://github.com/wunianze666-netizen/oss-pr-followup.git@v0.5.1"
+python -m pip install "git+https://github.com/wunianze666-netizen/oss-pr-followup.git@v0.5.2"
 ```
 
 Python 3.10 or later is required. GitHub CLI is optional.
@@ -67,6 +67,13 @@ status `2` instead of presenting a partial list as a successful report. An
 existing `--output` file remains unchanged; retry the command later. A complete
 empty response is still a valid report. This check is separate from the
 intentional `--limit` cap and does not apply to the GitHub CLI or offline sources.
+
+Search results are ordered by recent activity, so a PR updated while multiple
+pages are being fetched can move between pages. The REST and GraphQL fetchers
+deduplicate by repository and PR number, and continue pagination until the
+requested number of unique PRs is collected or GitHub reports no next page.
+This prevents a repeated result from consuming the `--limit` budget and hiding
+another open PR.
 
 ## Actionable triage
 

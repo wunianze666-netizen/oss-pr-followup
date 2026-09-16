@@ -40,7 +40,7 @@ FAILED_CHECK_RUN_CONCLUSIONS = frozenset(
 )
 FAILED_STATUS_CONTEXT_STATES = frozenset({"ERROR", "FAILURE"})
 CONCRETE_CI_FAILURE_RESULTS = frozenset({"ERROR", "FAILURE"})
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 USER_AGENT = f"oss-pr-followup/{VERSION}"
 AUTHOR_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 UTC = timezone.utc
@@ -423,6 +423,24 @@ def normalize_api_pr(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def append_unique_prs(
+    results: list[dict[str, Any]],
+    candidates: Sequence[dict[str, Any]],
+    seen: set[tuple[str, int]],
+) -> None:
+    """Append PRs once while preserving the search result order."""
+    for candidate in candidates:
+        repository = candidate.get("repository")
+        name = repository.get("nameWithOwner") if isinstance(repository, dict) else None
+        number = candidate.get("number")
+        if isinstance(name, str) and isinstance(number, int):
+            identity = (name.casefold(), number)
+            if identity in seen:
+                continue
+            seen.add(identity)
+        results.append(candidate)
+
+
 def fetch_open_prs_api(
     author: str,
     *,
@@ -432,6 +450,7 @@ def fetch_open_prs_api(
 ) -> list[dict[str, Any]]:
     """Fetch up to `limit` open PRs through GitHub's public REST API."""
     results: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
     page = 1
     page_size = min(100, limit)
     while len(results) < limit:
@@ -453,7 +472,11 @@ def fetch_open_prs_api(
         items = payload.get("items")
         if not isinstance(items, list):
             raise CLIError("GitHub API search response did not contain a pull request list.")
-        results.extend(normalize_api_pr(item) for item in items if isinstance(item, dict))
+        append_unique_prs(
+            results,
+            [normalize_api_pr(item) for item in items if isinstance(item, dict)],
+            seen,
+        )
         total_count = payload.get("total_count", len(results))
         if not isinstance(total_count, int):
             raise CLIError("GitHub API search response contained an invalid result count.")
@@ -618,6 +641,7 @@ def fetch_open_prs_graphql(
 ) -> list[dict[str, Any]]:
     """Fetch rich PR review and CI signals in batches through GraphQL."""
     results: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
     cursor: str | None = None
     while len(results) < limit:
         variables = {
@@ -633,10 +657,14 @@ def fetch_open_prs_graphql(
         nodes = search.get("nodes")
         if not isinstance(nodes, list):
             raise CLIError("GitHub GraphQL search did not contain a pull request list.")
-        results.extend(
-            normalize_graphql_pr(node)
-            for node in nodes
-            if isinstance(node, dict) and isinstance(node.get("repository"), dict)
+        append_unique_prs(
+            results,
+            [
+                normalize_graphql_pr(node)
+                for node in nodes
+                if isinstance(node, dict) and isinstance(node.get("repository"), dict)
+            ],
+            seen,
         )
 
         page_info = search.get("pageInfo")
@@ -644,9 +672,12 @@ def fetch_open_prs_graphql(
             raise CLIError("GitHub GraphQL search did not contain pagination data.")
         if not page_info.get("hasNextPage") or not nodes:
             break
-        cursor = page_info.get("endCursor")
-        if not isinstance(cursor, str) or not cursor:
+        next_cursor = page_info.get("endCursor")
+        if not isinstance(next_cursor, str) or not next_cursor:
             raise CLIError("GitHub GraphQL search returned an invalid pagination cursor.")
+        if next_cursor == cursor:
+            raise CLIError("GitHub GraphQL search repeated its pagination cursor.")
+        cursor = next_cursor
     return results[:limit]
 
 
