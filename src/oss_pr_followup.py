@@ -40,7 +40,7 @@ FAILED_CHECK_RUN_CONCLUSIONS = frozenset(
 )
 FAILED_STATUS_CONTEXT_STATES = frozenset({"ERROR", "FAILURE"})
 CONCRETE_CI_FAILURE_RESULTS = frozenset({"ERROR", "FAILURE"})
-VERSION = "0.5.2"
+VERSION = "0.6.0"
 USER_AGENT = f"oss-pr-followup/{VERSION}"
 AUTHOR_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 UTC = timezone.utc
@@ -502,6 +502,12 @@ def normalize_graphql_pr(item: dict[str, Any]) -> dict[str, Any]:
 
     comments = item.get("comments")
     comments_count = comments.get("totalCount", 0) if isinstance(comments, dict) else 0
+    comment_nodes = comments.get("nodes", []) if isinstance(comments, dict) else []
+    if not isinstance(comment_nodes, list):
+        comment_nodes = []
+    discussion_comments_truncated = (
+        isinstance(comments_count, int) and comments_count > len(comment_nodes)
+    )
     review_requests = item.get("reviewRequests")
     review_request_count = (
         review_requests.get("totalCount", 0) if isinstance(review_requests, dict) else 0
@@ -566,7 +572,6 @@ def normalize_graphql_pr(item: dict[str, Any]) -> dict[str, Any]:
 
     latest_discussion_comment_author = None
     latest_discussion_comment_at = None
-    comment_nodes = comments.get("nodes", []) if isinstance(comments, dict) else []
     for comment in comment_nodes:
         if not isinstance(comment, dict):
             continue
@@ -588,6 +593,9 @@ def normalize_graphql_pr(item: dict[str, Any]) -> dict[str, Any]:
         latest_discussion_comment_author = comment_login
         latest_discussion_comment_at = comment_created_at
 
+    discussion_history_incomplete = (
+        discussion_comments_truncated and latest_discussion_comment_author is None
+    )
     discussion_needs_inspection = False
     if (
         isinstance(author_login, str)
@@ -622,6 +630,8 @@ def normalize_graphql_pr(item: dict[str, Any]) -> dict[str, Any]:
             isinstance(thread_total, int) and thread_total > len(thread_nodes)
         ),
         "discussionNeedsInspection": discussion_needs_inspection,
+        "discussionCommentsTruncated": discussion_comments_truncated,
+        "discussionHistoryIncomplete": discussion_history_incomplete,
         "latestDiscussionCommentAuthor": latest_discussion_comment_author,
         "latestDiscussionCommentAt": latest_discussion_comment_at,
         "mergeStateStatus": item.get("mergeStateStatus"),
@@ -762,6 +772,12 @@ def report_pr(pr: dict[str, Any], now: datetime) -> dict[str, Any]:
                 "reviewThreadsTruncated": bool(pr.get("reviewThreadsTruncated", False)),
                 "discussionNeedsInspection": bool(
                     pr.get("discussionNeedsInspection", False)
+                ),
+                "discussionCommentsTruncated": bool(
+                    pr.get("discussionCommentsTruncated", False)
+                ),
+                "discussionHistoryIncomplete": bool(
+                    pr.get("discussionHistoryIncomplete", False)
                 ),
                 "latestDiscussionCommentAuthor": pr.get(
                     "latestDiscussionCommentAuthor"
@@ -908,6 +924,14 @@ def classify_attention(
         return "author-action", ci_failure_reason(pr, ci_status)
     if merge_status == "DIRTY":
         return "author-action", "The PR has merge conflicts."
+    if pr.get("discussionHistoryIncomplete"):
+        return (
+            "author-action",
+            (
+                "The discussion history exceeds the query window and no author or "
+                "maintainer comment is visible; inspect the full discussion."
+            ),
+        )
     if pr.get("discussionNeedsInspection"):
         return (
             "author-action",
@@ -1077,6 +1101,9 @@ def render_pr_line(pr: dict[str, Any], *, include_triage: bool = False) -> str:
             f"discussion: inspect @{pr['latestDiscussionCommentAuthor']}'s latest comment"
             if pr.get("discussionNeedsInspection")
             and isinstance(pr.get("latestDiscussionCommentAuthor"), str)
+            else None,
+            "discussion: older comments omitted"
+            if pr.get("discussionCommentsTruncated")
             else None,
         ]
         signal_summary = "; ".join(signal for signal in signals if signal)

@@ -124,16 +124,19 @@ the query window, including its conclusion and details URL. Only an explicit
 ambiguous outcomes enter **CI needs investigation** and do not trigger
 `--fail-on-author-action`. A truncation signal is emitted when a commit has more
 than 50 check contexts, rather than silently implying that the visible list is
-complete. For active inline feedback, the report distinguishes a
-thread awaiting the author's reply from one where the author has replied and
-is waiting on a reviewer. For top-level discussion, it compares the latest
-author-or-maintainer comment with the head commit and ignores bots and unrelated
-commenters; this deliberately asks for inspection rather than guessing the
-comment's intent. Bot-only review threads are conservatively flagged for
-inspection instead of being silently ignored. To stay within GitHub's GraphQL
-resource limits, triage batches 10 PRs per query, inspects up to 10 discussion
-comments and review threads per PR, and flags larger review-thread histories
-for direct inspection.
+complete. For active inline feedback, the report distinguishes a thread awaiting
+the author's reply from one where the author has replied and is waiting on a
+reviewer. For top-level discussion, it compares the latest author-or-maintainer
+comment with the head commit and ignores bots and unrelated commenters; this
+deliberately asks for inspection rather than guessing the comment's intent. If
+the 10-comment window is truncated and contains no author or maintainer comment,
+the PR is flagged for direct inspection because an older request cannot be ruled
+out. A visible relevant comment makes the recent window sufficient, while the
+JSON and Markdown reports still disclose that older comments were omitted.
+Bot-only review threads are conservatively flagged for inspection instead of
+being silently ignored. To stay within GitHub's GraphQL resource limits, triage
+batches 10 PRs per query, inspects up to 10 discussion comments and review
+threads per PR, and flags incomplete histories for direct inspection.
 
 Scheduled jobs can turn the **Author action needed** category into a reliable
 process signal without losing the report:

@@ -61,6 +61,8 @@ def rich_pr(
     reviewer_action_threads: int = 0,
     review_threads_truncated: bool = False,
     discussion_needs_inspection: bool = False,
+    discussion_comments_truncated: bool = False,
+    discussion_history_incomplete: bool = False,
     latest_discussion_comment_author: str | None = None,
     latest_discussion_comment_at: str | None = None,
     failed_checks: list[dict] | None = None,
@@ -77,6 +79,8 @@ def rich_pr(
             "reviewThreadReviewerActionCount": reviewer_action_threads,
             "reviewThreadsTruncated": review_threads_truncated,
             "discussionNeedsInspection": discussion_needs_inspection,
+            "discussionCommentsTruncated": discussion_comments_truncated,
+            "discussionHistoryIncomplete": discussion_history_incomplete,
             "latestDiscussionCommentAuthor": latest_discussion_comment_author,
             "latestDiscussionCommentAt": latest_discussion_comment_at,
             "mergeStateStatus": merge,
@@ -410,6 +414,85 @@ class ReportTests(unittest.TestCase):
 
         self.assertFalse(normalized["discussionNeedsInspection"])
         self.assertIsNone(normalized["latestDiscussionCommentAuthor"])
+
+    def test_normalize_graphql_pr_flags_incomplete_discussion_history(self) -> None:
+        comments = [
+            {
+                "author": {"login": f"participant-{index}", "__typename": "User"},
+                "authorAssociation": "NONE",
+                "createdAt": f"2026-07-29T11:{index:02d}:00Z",
+            }
+            for index in range(10)
+        ]
+
+        normalized = normalize_graphql_pr(
+            {
+                "repository": {"nameWithOwner": "example/project"},
+                "number": 42,
+                "title": "Improve API support",
+                "updatedAt": "2026-07-29T12:00:00Z",
+                "url": "https://github.com/example/project/pull/42",
+                "author": {"login": "octocat"},
+                "comments": {"totalCount": 11, "nodes": comments},
+                "commits": {
+                    "nodes": [
+                        {
+                            "commit": {
+                                "committedDate": "2026-07-29T10:00:00Z",
+                                "statusCheckRollup": {"state": "SUCCESS"},
+                            }
+                        }
+                    ]
+                },
+            }
+        )
+
+        self.assertTrue(normalized["discussionCommentsTruncated"])
+        self.assertTrue(normalized["discussionHistoryIncomplete"])
+        self.assertFalse(normalized["discussionNeedsInspection"])
+
+    def test_normalize_graphql_pr_accepts_truncated_window_with_relevant_comment(self) -> None:
+        comments = [
+            {
+                "author": {"login": f"participant-{index}", "__typename": "User"},
+                "authorAssociation": "NONE",
+                "createdAt": f"2026-07-29T11:{index:02d}:00Z",
+            }
+            for index in range(9)
+        ]
+        comments.append(
+            {
+                "author": {"login": "OctoCat", "__typename": "User"},
+                "authorAssociation": "NONE",
+                "createdAt": "2026-07-29T11:30:00Z",
+            }
+        )
+
+        normalized = normalize_graphql_pr(
+            {
+                "repository": {"nameWithOwner": "example/project"},
+                "number": 42,
+                "title": "Improve API support",
+                "updatedAt": "2026-07-29T12:00:00Z",
+                "url": "https://github.com/example/project/pull/42",
+                "author": {"login": "octocat"},
+                "comments": {"totalCount": 11, "nodes": comments},
+                "commits": {
+                    "nodes": [
+                        {
+                            "commit": {
+                                "committedDate": "2026-07-29T10:00:00Z",
+                                "statusCheckRollup": {"state": "SUCCESS"},
+                            }
+                        }
+                    ]
+                },
+            }
+        )
+
+        self.assertTrue(normalized["discussionCommentsTruncated"])
+        self.assertFalse(normalized["discussionHistoryIncomplete"])
+        self.assertFalse(normalized["discussionNeedsInspection"])
 
     def test_normalize_graphql_pr_ignores_old_failures_after_rollup_recovers(self) -> None:
         normalized = normalize_graphql_pr(
@@ -936,6 +1019,8 @@ class ReportTests(unittest.TestCase):
             ),
             (rich_pr(10, unresolved_threads=1), "author-action"),
             (rich_pr(11, review_threads_truncated=True), "author-action"),
+            (rich_pr(12, discussion_history_incomplete=True), "author-action"),
+            (rich_pr(13, discussion_comments_truncated=True), "monitoring"),
             (
                 rich_pr(
                     14,
@@ -1183,6 +1268,30 @@ class ReportTests(unittest.TestCase):
 
         self.assertIn("latest maintainer discussion comment", report)
         self.assertIn("discussion: inspect @maintainer's latest comment", report)
+
+    def test_triage_surfaces_incomplete_discussion_history(self) -> None:
+        data = build_report_data(
+            [
+                rich_pr(
+                    16,
+                    discussion_comments_truncated=True,
+                    discussion_history_incomplete=True,
+                )
+            ],
+            author="octocat",
+            stale_after_days=14,
+            now=NOW,
+            triage=True,
+        )
+
+        pull_request = data["pullRequests"][0]
+        report = render_markdown(data)
+
+        self.assertTrue(pull_request["discussionCommentsTruncated"])
+        self.assertTrue(pull_request["discussionHistoryIncomplete"])
+        self.assertEqual(pull_request["attentionCategory"], "author-action")
+        self.assertIn("discussion history exceeds the query window", report)
+        self.assertIn("discussion: older comments omitted", report)
 
     def test_api_rate_limit_error_does_not_expose_token(self) -> None:
         def rate_limited(*_args, **_kwargs):
