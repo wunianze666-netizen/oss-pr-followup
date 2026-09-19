@@ -328,6 +328,116 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(normalized["latestDiscussionCommentAuthor"], "maintainer")
         self.assertEqual(normalized["latestDiscussionCommentAt"], "2026-07-29T11:00:00Z")
 
+    def test_normalize_graphql_pr_keeps_discussion_separate_from_review_threads(self) -> None:
+        normalized = normalize_graphql_pr(
+            {
+                "repository": {"nameWithOwner": "example/project"},
+                "number": 42,
+                "title": "Improve API support",
+                "updatedAt": "2026-07-29T12:00:00Z",
+                "url": "https://github.com/example/project/pull/42",
+                "author": {"login": "octocat"},
+                "comments": {
+                    "totalCount": 1,
+                    "nodes": [
+                        {
+                            "author": {"login": "maintainer", "__typename": "User"},
+                            "authorAssociation": "MEMBER",
+                            "createdAt": "2026-07-29T11:00:00Z",
+                        }
+                    ],
+                },
+                "reviewThreads": {
+                    "totalCount": 1,
+                    "nodes": [
+                        {
+                            "isResolved": False,
+                            "isOutdated": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "author": {
+                                            "login": "octocat",
+                                            "__typename": "User",
+                                        }
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                },
+                "commits": {
+                    "nodes": [
+                        {
+                            "commit": {
+                                "committedDate": "2026-07-29T10:00:00Z",
+                                "statusCheckRollup": {"state": "SUCCESS"},
+                            }
+                        }
+                    ]
+                },
+            }
+        )
+
+        self.assertEqual(normalized["reviewThreadReviewerActionCount"], 1)
+        self.assertTrue(normalized["discussionNeedsInspection"])
+        self.assertEqual(normalized["latestDiscussionCommentAuthor"], "maintainer")
+
+    def test_normalize_graphql_pr_does_not_invent_incomplete_discussion_from_thread(self) -> None:
+        normalized = normalize_graphql_pr(
+            {
+                "repository": {"nameWithOwner": "example/project"},
+                "number": 42,
+                "title": "Improve API support",
+                "updatedAt": "2026-07-29T12:00:00Z",
+                "url": "https://github.com/example/project/pull/42",
+                "author": {"login": "octocat"},
+                "comments": {
+                    "totalCount": 2,
+                    "nodes": [
+                        {
+                            "author": {"login": "octocat", "__typename": "User"},
+                            "authorAssociation": "NONE",
+                            "createdAt": "2026-07-29T11:30:00Z",
+                        }
+                    ],
+                },
+                "reviewThreads": {
+                    "totalCount": 1,
+                    "nodes": [
+                        {
+                            "isResolved": False,
+                            "isOutdated": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "author": {
+                                            "login": "review-bot",
+                                            "__typename": "Bot",
+                                        }
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                },
+                "commits": {
+                    "nodes": [
+                        {
+                            "commit": {
+                                "committedDate": "2026-07-29T10:00:00Z",
+                                "statusCheckRollup": {"state": "SUCCESS"},
+                            }
+                        }
+                    ]
+                },
+            }
+        )
+
+        self.assertTrue(normalized["discussionCommentsTruncated"])
+        self.assertFalse(normalized["discussionHistoryIncomplete"])
+        self.assertEqual(normalized["latestDiscussionCommentAuthor"], "octocat")
+
     def test_normalize_graphql_pr_clears_maintainer_comment_after_author_response(self) -> None:
         for comments, committed_at in (
             (

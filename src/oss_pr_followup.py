@@ -502,11 +502,14 @@ def normalize_graphql_pr(item: dict[str, Any]) -> dict[str, Any]:
 
     comments = item.get("comments")
     comments_count = comments.get("totalCount", 0) if isinstance(comments, dict) else 0
-    comment_nodes = comments.get("nodes", []) if isinstance(comments, dict) else []
-    if not isinstance(comment_nodes, list):
-        comment_nodes = []
+    discussion_comment_nodes = (
+        comments.get("nodes", []) if isinstance(comments, dict) else []
+    )
+    if not isinstance(discussion_comment_nodes, list):
+        discussion_comment_nodes = []
     discussion_comments_truncated = (
-        isinstance(comments_count, int) and comments_count > len(comment_nodes)
+        isinstance(comments_count, int)
+        and comments_count > len(discussion_comment_nodes)
     )
     review_requests = item.get("reviewRequests")
     review_request_count = (
@@ -534,10 +537,10 @@ def normalize_graphql_pr(item: dict[str, Any]) -> dict[str, Any]:
             continue
         active_thread_count += 1
         thread_comments = thread.get("comments")
-        comment_nodes = (
+        thread_comment_nodes = (
             thread_comments.get("nodes", []) if isinstance(thread_comments, dict) else []
         )
-        latest_comment = comment_nodes[-1] if comment_nodes else None
+        latest_comment = thread_comment_nodes[-1] if thread_comment_nodes else None
         latest_author = (
             latest_comment.get("author") if isinstance(latest_comment, dict) else None
         )
@@ -572,7 +575,7 @@ def normalize_graphql_pr(item: dict[str, Any]) -> dict[str, Any]:
 
     latest_discussion_comment_author = None
     latest_discussion_comment_at = None
-    for comment in comment_nodes:
+    for comment in discussion_comment_nodes:
         if not isinstance(comment, dict):
             continue
         comment_author = comment.get("author")
